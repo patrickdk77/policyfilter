@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"math"
 	"net"
@@ -55,6 +56,9 @@ func parseNetworks(envs string) []*net.IPNet {
 }
 
 func main() {
+	flagReport := flag.Bool("report", false, "Generate out-of-band DMARC RUA report for yesterday")
+	flag.Parse()
+
 	log.Println("Starting Postfix Policy Filter (Milter) for SPF, DKIM, and DMARC")
 
 	debugVal := os.Getenv("DEBUG")
@@ -152,6 +156,7 @@ func main() {
 	enableDMARC, rejectDMARC := resolveAction("ENABLE_DMARC", dfltOvr.EnableDMARC, dfltOvr.RejectOnDMARCFail, true, true)
 
 	var ycValkeyUrl, ycMysql, ycMilterAddr, ycWhite, ycHostname *string
+	var ycReportSmtp, ycReportOrg, ycReportEmail, ycReportContact, ycReportDomain *string
 	var ycMaxMsg *int
 	var ycHeloTTL, ycGreyV4, ycGreyV6, ycGreyWait, ycGreyUn, ycGreyMat *int
 
@@ -162,6 +167,13 @@ func main() {
 		ycMilterAddr = yc.Config.MilterAddress
 		ycValkeyUrl = yc.Config.ValkeyUrl
 		ycMysql = yc.Config.Mysql
+		if yc.Config.Report != nil {
+			ycReportSmtp = yc.Config.Report.SMTP
+			ycReportOrg = yc.Config.Report.OrgName
+			ycReportEmail = yc.Config.Report.Email
+			ycReportContact = yc.Config.Report.ContactInfo
+			ycReportDomain = yc.Config.Report.Domain
+		}
 		if yc.Config.Helo != nil {
 			ycHeloTTL = yc.Config.Helo.TTLDays
 		}
@@ -214,6 +226,11 @@ func main() {
 		GreylistMatchedTTL:   int64(resolveInt("GREYLIST_MATCHED_TTL_DAYS", ycGreyMat, 30) * 86400),
 		WhitelistedNetworks:  parseNetworks(resolveStr("WHITELIST_NETWORKS", ycWhite, "10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,127.0.0.0/8,fe80::/10,::1/128")),
 		MaxMessageSize:       resolveInt("MAX_MESSAGE_SIZE", ycMaxMsg, 10485760*40),
+		ReportSMTP:           resolveStr("REPORT_SMTP", ycReportSmtp, ""),
+		ReportOrgName:        resolveStr("REPORT_ORG_NAME", ycReportOrg, hostname),
+		ReportEmail:          resolveStr("REPORT_EMAIL", ycReportEmail, "noreply@"+hostname),
+		ReportContactInfo:    resolveStr("REPORT_CONTACT_INFO", ycReportContact, ""),
+		ReportDomain:         resolveStr("REPORT_DOMAIN", ycReportDomain, hostname),
 	}
 
 	if config.MysqlDSN != "" && yc == nil {
@@ -233,7 +250,7 @@ func main() {
 		config.BasePolicy.EnableGreylisting, config.GreylistIPv4Mask, config.GreylistIPv6Mask,
 		int(math.Round(float64(config.GreylistWait)/60)), int(math.Round(float64(config.GreylistUnmatchedTTL)/86400)), int(math.Round(float64(config.GreylistMatchedTTL)/86400)))
 
-	needsValkey := config.BasePolicy.HeloMaxChanges > 0 || config.BasePolicy.EnableGreylisting
+	needsValkey := config.ValkeyURL != "" || config.BasePolicy.HeloMaxChanges > 0 || config.BasePolicy.EnableGreylisting
 	var vc valkey.Client
 
 	if needsValkey {
@@ -252,6 +269,11 @@ func main() {
 		log.Println("Connected to Valkey.")
 	} else if config.ValkeyURL != "" {
 		log.Println("VALKEY_URL is provided, but HELO checking and Greylisting are disabled. Valkey connection will not be established.")
+	}
+
+	if *flagReport {
+		generateDailyReport(config, vc, yc)
+		return
 	}
 
 	var db *sql.DB

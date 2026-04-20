@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -86,6 +87,11 @@ type Config struct {
 	// Verified: Array naturally transitioned to map[string][]string dictionary at Line 26
 	WhitelistedNetworks []*net.IPNet
 	MaxMessageSize      int
+	ReportSMTP          string
+	ReportOrgName       string
+	ReportEmail         string
+	ReportContactInfo   string
+	ReportDomain        string
 }
 
 type YAMLConfig struct {
@@ -96,6 +102,13 @@ type YAMLConfig struct {
 		MilterAddress     *string `yaml:"milteraddress"`
 		ValkeyUrl         *string `yaml:"valkeyurl"`
 		Mysql             *string `yaml:"mysql"`
+		Report            *struct {
+			SMTP        *string `yaml:"smtp"`
+			OrgName     *string `yaml:"orgname"`
+			Email       *string `yaml:"email"`
+			Domain      *string `yaml:"domain"`
+			ContactInfo *string `yaml:"contactinfo"`
+		} `yaml:"report"`
 		Helo              *struct {
 			TTLDays *int `yaml:"ttldays"`
 		} `yaml:"helo"`
@@ -139,6 +152,15 @@ type Message struct {
 	spfResult       spf.Result
 	spfErr          error
 	greylistDelayed bool
+}
+
+type DmarcRuaStat struct {
+	IP          string `json:"ip"`
+	Disposition string `json:"disposition"`
+	DKIMDomain  string `json:"dkim_domain"`
+	DKIMResult  string `json:"dkim_result"`
+	SPFDomain   string `json:"spf_domain"`
+	SPFResult   string `json:"spf_result"`
 }
 
 type PolicyFilter struct {
@@ -675,6 +697,84 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 
 				if dkimAligned || spfAligned {
 					dmarcPass = true
+				}
+
+				if pf.valkey != nil {
+					disposition := string(dmarcRecord.Policy)
+					if dmarcPass {
+						disposition = "none"
+					}
+					
+					dkimDom := ""
+					dkimRes := "none"
+					if len(dkimResults) > 0 {
+						dkimRes = "fail"
+						for _, v := range dkimResults {
+							if v.Err == nil {
+								dkimDom = v.Domain
+								dkimRes = "pass"
+								break
+							} else if dkimDom == "" {
+								dkimDom = v.Domain
+							}
+						}
+					}
+
+					spfResStr := "none"
+					switch spfResult {
+					case spf.Pass: spfResStr = "pass"
+					case spf.Fail, spf.SoftFail: spfResStr = "fail"
+					case spf.PermError, spf.TempError: spfResStr = "error"
+					}
+
+					stat := DmarcRuaStat{
+						IP:          pf.ip.String(),
+						Disposition: disposition,
+						DKIMDomain:  dkimDom,
+						DKIMResult:  dkimRes,
+						SPFDomain:   senderDomain,
+						SPFResult:   spfResStr,
+					}
+					
+					if b, err := json.Marshal(stat); err == nil {
+						key := fmt.Sprintf("dmarc_rua:%s:%s", time.Now().Format("20060102"), fromDomain)
+						luaScript := `
+							redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
+							if ARGV[2] ~= "" then
+								redis.call('HSET', KEYS[1], '_rua', ARGV[2])
+							end
+							if ARGV[3] ~= "" then
+								redis.call('HSET', KEYS[1], '_policy', ARGV[3])
+							end
+							redis.call('EXPIRE', KEYS[1], 180000)
+							return 1
+						`
+						
+						ruaStr := ""
+						if len(dmarcRecord.ReportURIAggregate) > 0 {
+							ruaStr = strings.Join(dmarcRecord.ReportURIAggregate, ",")
+						}
+
+						pct := 100
+						if dmarcRecord.Percent != nil {
+							pct = *dmarcRecord.Percent
+						}
+
+						policyBlob, _ := json.Marshal(map[string]any{
+							"domain": fromDomain,
+							"adkim":  string(dmarcRecord.DKIMAlignment),
+							"aspf":   string(dmarcRecord.SPFAlignment),
+							"p":      string(dmarcRecord.Policy),
+							"sp":     string(dmarcRecord.SubdomainPolicy),
+							"pct":    pct,
+						})
+						
+						go func(k, s, r, pol string) {
+							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							defer cancel()
+							pf.valkey.Do(ctx, pf.valkey.B().Eval().Script(luaScript).Numkeys(1).Key(k).Arg(s).Arg(r).Arg(pol).Build())
+						}(key, string(b), ruaStr, string(policyBlob))
+					}
 				}
 
 				if dmarcPass {

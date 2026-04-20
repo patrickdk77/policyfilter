@@ -33,7 +33,7 @@ This application is configured natively through environment flags:
 - `CONFIG` (optional, required if `MYSQL_DSN` is used. e.g. `/etc/policyfilter.yaml`)
 
 ### Valkey Config (HELO / Greylisting)
-- `VALKEY_URL` (optional, e.g. `valkey://127.0.0.1:6379/0`)
+- `VALKEY_URL` (optional, e.g. `valkey://127.0.0.1:6379/0`) Requires valkey 9.0 or later (needs HEXPIRE/HTTL)
 - `HELO_MAX_CHANGES` (default `0`)
 - `HELO_TTL_DAYS` (default `14`)
 - `ENABLE_GREYLISTING` (default `false`)
@@ -51,17 +51,30 @@ This application is configured natively through environment flags:
 ENABLE_DKIM=false ENABLE_SPF=reject ENABLE_GREYLISTING=true ./policyfilter
 ```
 
+## DMARC Reports
+
+```cronjob
+0 42 * * * policyfilter -report
+```
+
+
 ### External Dynamic Policy Configuration (YAML)
 
 When `MYSQL_DSN` is set, the application expects `CONFIG` to map database string keys natively to policy overrides. Example `policies.yaml`:
 ```yaml
 config:
   maxmessagesize: 10485760
-  mailname: mail.example.com
+  mailname: mx.example.org
   whitelistnetworks: 127.0.0.0/8,::1/128
   milteraddress: 127.0.0.1:9998
   valkeyurl: valkey://127.0.0.1:6379/0
   mysql: user:pass@tcp(host:port)/dbname
+  report:
+    smtp: smtp://user:pass@smtp.example.com:587
+    orgname: Example Org
+    email: dmarcreports@example.org
+    domain: example.org
+    contactinfo: https://example.org/dmarc
   helo:
     ttldays: 14
   greylist:

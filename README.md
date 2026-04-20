@@ -9,7 +9,7 @@ This is built as a Milter rather than a standard delegate policy filter because 
 - **Header Modification (`Authentication-Results`):** If DMARC, DKIM, or SPF checking is enabled, an `Authentication-Results` header will be appended
 - **Per-Recipient Overrides (MySQL):** Extracts the initial recipient's email address during the `RcptTo` stage, enforcing ASCII (Punycode) character encoding standards on the domain.
 - **Greylisting (Valkey):** If retry occurred too soon within the `GREYLIST_WAIT_MINS` period, it produces an immediate `451 4.7.1 Greylisted` response. Successful matches increase the record retention lifespan drastically to reward good MTAs! Good MTAs with a greylisting whitelist count will be whitelisted for the duration of the greylist entry for other recipients, also a valid SPF/DKIM/DMARC result will whitelist the IP for the duration of the greylist entry for other recipients if the greylist delay option is used.
-- **HELO Tracking (Valkey):** Tracks unique HELO names per IP. If the IP rotates HELO names more than `HELO_MAX_CHANGES` within `HELO_TTL_SECONDS`, the connection is immediately rejected during the HELO callback.
+- **HELO Tracking (Valkey):** Tracks unique HELO names per IP. If the IP rotates HELO names more than `HELO_MAX_CHANGES` within `HELO_TTL_DAYS`, the connection is immediately rejected during the HELO callback.
 
 ## Configuration (Environment Variables)
 
@@ -32,7 +32,7 @@ This application is configured natively through environment flags:
 - `MYSQL_DSN` (optional, e.g. `user:pass@tcp(host:port)/dbname`)
 - `CONFIG` (optional, required if `MYSQL_DSN` is used. e.g. `/etc/policyfilter.yaml`)
 
-### Valkey Config (HELO / Greylisting)
+### Valkey Config (HELO / Greylisting / DMARC Reporting)
 - `VALKEY_URL` (optional, e.g. `valkey://127.0.0.1:6379/0`) Requires valkey 9.0 or later (needs HEXPIRE/HTTL)
 - `HELO_MAX_CHANGES` (default `0`)
 - `HELO_TTL_DAYS` (default `14`)
@@ -44,6 +44,7 @@ This application is configured natively through environment flags:
 - `GREYLIST_MATCHED_TTL_DAYS` (default `30`)
 - `DELAY_GREYLISTING` (default `true`) - Delays the greylisting rejection until the message body is processed. If false, the rejection will happen during the RcptTo stage, allows for greylisting to work with DMARC.
 - `GREYLIST_WHITELIST_COUNT` (default `0`) - If set to > 0, it will whitelist the IP based on the number of successful greylists till those greylist entries expire. This is not masked by the greylist mask, but all greylist matchs must be from this exact ip address.
+- `-report` - sends out DMARC reports for the previous day
 
 ## How to Run & Test
 
@@ -54,7 +55,7 @@ ENABLE_DKIM=false ENABLE_SPF=reject ENABLE_GREYLISTING=true ./policyfilter
 ## DMARC Reports
 
 ```cronjob
-0 42 * * * policyfilter -report
+42 0 * * * policyfilter -report
 ```
 
 

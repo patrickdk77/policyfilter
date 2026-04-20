@@ -1,0 +1,320 @@
+package main
+
+import (
+	"log"
+	"math"
+	"net"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+
+	"database/sql"
+
+	"github.com/emersion/go-milter"
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/valkey-io/valkey-go"
+)
+
+var debugLog bool
+
+func debugf(format string, v ...any) {
+	if debugLog {
+		log.Printf(format, v...)
+	}
+}
+
+func parseNetworks(envs string) []*net.IPNet {
+	var nets []*net.IPNet
+	if envs == "" {
+		return nets
+	}
+	parts := strings.Split(envs, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !strings.Contains(p, "/") {
+			if strings.Contains(p, ":") {
+				p = p + "/128"
+			} else {
+				p = p + "/32"
+			}
+		}
+		_, ipnet, err := net.ParseCIDR(p)
+		if err == nil && ipnet != nil {
+			nets = append(nets, ipnet)
+		} else {
+			log.Printf("Warning: failed to parse whitelist network %s", p)
+		}
+	}
+	return nets
+}
+
+
+
+func main() {
+	log.Println("Starting Postfix Policy Filter (Milter) for SPF, DKIM, and DMARC")
+
+	debugVal := os.Getenv("DEBUG")
+	if strings.ToLower(debugVal) == "true" || debugVal == "1" {
+		debugLog = true
+	}
+
+	policyConfigFile := os.Getenv("POLICY_CONFIG_FILE")
+	if policyConfigFile == "" {
+		policyConfigFile = "/etc/policyfilter.yaml"
+	}
+	
+	var yc *YAMLConfig
+	cfg, err := LoadPolicyTable(policyConfigFile)
+	if err != nil {
+		if os.Getenv("POLICY_CONFIG_FILE") != "" {
+			log.Printf("Warning: Failed to load POLICY_CONFIG_FILE %s: %v", policyConfigFile, err)
+		}
+	} else {
+		log.Printf("Loaded policies and configuration from %s", policyConfigFile)
+		yc = cfg
+	}
+
+	resolveBool := func(envKey string, yamlVal *bool, fallback bool) bool {
+		if val, ok := os.LookupEnv(envKey); ok {
+			val = strings.ToLower(val)
+			if b, err := strconv.ParseBool(val); err == nil { return b }
+		}
+		if yamlVal != nil { return *yamlVal }
+		return fallback
+	}
+
+	resolveInt := func(envKey string, yamlVal *int, fallback int) int {
+		if val, ok := os.LookupEnv(envKey); ok {
+			if i, err := strconv.Atoi(val); err == nil { return i }
+		}
+		if yamlVal != nil { return *yamlVal }
+		return fallback
+	}
+
+	resolveStr := func(envKey string, yamlVal *string, fallback string) string {
+		if val, ok := os.LookupEnv(envKey); ok { return val }
+		if yamlVal != nil { return *yamlVal }
+		return fallback
+	}
+
+	resolveAction := func(envKey string, enableYaml *bool, rejectYaml *bool, enableFallback, rejectFallback bool) (bool, bool) {
+		enable := enableFallback
+		reject := rejectFallback
+		if enableYaml != nil { enable = *enableYaml }
+		if rejectYaml != nil { reject = *rejectYaml }
+
+		val, ok := os.LookupEnv(envKey)
+		if !ok { return enable, reject }
+
+		val = strings.ToLower(val)
+		switch val {
+		case "true", "1", "yes":
+			return true, false
+		case "reject":
+			return true, true
+		case "false", "0", "no":
+			return false, false
+		}
+		return enable, reject
+	}
+
+	var dfltOvr OverridePolicy
+	if yc != nil && yc.Profiles != nil {
+		if pf, ok := yc.Profiles["default"]; ok {
+			dfltOvr = pf
+		}
+	}
+
+	enableSPF, rejectSPF := resolveAction("ENABLE_SPF", dfltOvr.EnableSPF, dfltOvr.RejectOnSPFFail, true, false)
+	enableDKIM, rejectDKIM := resolveAction("ENABLE_DKIM", dfltOvr.EnableDKIM, dfltOvr.RejectOnDKIMFail, true, false)
+	enableDMARC, rejectDMARC := resolveAction("ENABLE_DMARC", dfltOvr.EnableDMARC, dfltOvr.RejectOnDMARCFail, true, true)
+
+	var ycValkeyUrl, ycMysql, ycMilterAddr, ycWhite, ycHostname *string
+	var ycMaxMsg *int
+	var ycHeloTTL, ycGreyV4, ycGreyV6, ycGreyWait, ycGreyUn, ycGreyMat *int
+	
+	if yc != nil {
+		ycMaxMsg = yc.Config.MaxMessageSize
+		ycHostname = yc.Config.MailName
+		ycWhite = yc.Config.WhitelistNetworks
+		ycMilterAddr = yc.Config.MilterAddress
+		ycValkeyUrl = yc.Config.ValkeyUrl
+		ycMysql = yc.Config.Mysql
+		if yc.Config.Helo != nil {
+			ycHeloTTL = yc.Config.Helo.TTLDays
+		}
+		if yc.Config.Greylist != nil {
+			ycGreyV4 = yc.Config.Greylist.IPv4Mask
+			ycGreyV6 = yc.Config.Greylist.IPv6Mask
+			ycGreyWait = yc.Config.Greylist.WaitMins
+			ycGreyUn = yc.Config.Greylist.UnmatchedTTLDays
+			ycGreyMat = yc.Config.Greylist.MatchedTTLDays
+		}
+	}
+
+	hostname := os.Getenv("MAILNAME")
+	if hostname == "" && ycHostname != nil {
+		hostname = *ycHostname
+	}
+	if hostname == "" {
+		hostname = os.Getenv("HOSTNAME")
+	}
+	if hostname == "" {
+		hostname, _ = os.Hostname()
+	}
+	if hostname == "" {
+		hostname = "localhost"
+	}
+
+	config := &Config{
+		BasePolicy: PolicyConfig{
+			EnableSPF:               enableSPF,
+			EnableDKIM:              enableDKIM,
+			EnableDMARC:             enableDMARC,
+			EnableGreylisting:       resolveBool("ENABLE_GREYLISTING", dfltOvr.EnableGreylist, false),
+			EnableNullSenders:       resolveBool("ENABLE_NULL_SENDERS", dfltOvr.EnableNullSenders, true),
+			RejectOnSPFFail:         rejectSPF,
+			RejectOnDKIMFail:        rejectDKIM,
+			RejectOnDMARCFail:       rejectDMARC,
+			RejectOnUnauthenticated: resolveBool("REJECT_UNAUTHENTICATED", dfltOvr.RejectOnUnauthenticated, true),
+			HeloMaxChanges:          resolveInt("HELO_MAX_CHANGES", dfltOvr.HeloMaxChanges, 0),
+			GreylistWhitelistCount:  resolveInt("GREYLIST_WHITELIST_COUNT", dfltOvr.GreylistWhitelistCount, 0),
+			DelayGreylisting:        resolveBool("DELAY_GREYLISTING", dfltOvr.DelayGreylisting, true),
+		},
+		ValkeyURL:            resolveStr("VALKEY_URL", ycValkeyUrl, ""),
+		MysqlDSN:             resolveStr("MYSQL_DSN", ycMysql, ""),
+		Hostname:             hostname,
+		HeloTTL:              int64(resolveInt("HELO_TTL_DAYS", ycHeloTTL, 14) * 86400),
+		GreylistIPv4Mask:     resolveInt("GREYLIST_IPV4_MASK", ycGreyV4, 24),
+		GreylistIPv6Mask:     resolveInt("GREYLIST_IPV6_MASK", ycGreyV6, 64),
+		GreylistWait:         int64(resolveInt("GREYLIST_WAIT_MINS", ycGreyWait, 1)*60) - 10,
+		GreylistUnmatchedTTL: int64(resolveInt("GREYLIST_UNMATCHED_TTL_DAYS", ycGreyUn, 2) * 86400),
+		GreylistMatchedTTL:   int64(resolveInt("GREYLIST_MATCHED_TTL_DAYS", ycGreyMat, 30) * 86400),
+		WhitelistedNetworks:  parseNetworks(resolveStr("WHITELIST_NETWORKS", ycWhite, "10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,127.0.0.0/8,fe80::/10,::1/128")),
+		MaxMessageSize:       resolveInt("MAX_MESSAGE_SIZE", ycMaxMsg, 10485760*40),
+	}
+
+	if config.MysqlDSN != "" && yc == nil {
+		log.Printf("Warning: POLICY_CONFIG_FILE is missing or invalid. Disabling MYSQL_DSN.")
+		config.MysqlDSN = ""
+	}
+
+	address := resolveStr("MILTER_ADDRESS", ycMilterAddr, "127.0.0.1:9998")
+
+	debugf("Configuration:")
+	debugf("  Listening on %s", address)
+	debugf("  SPF: Enable=%v Reject=%v", config.BasePolicy.EnableSPF, config.BasePolicy.RejectOnSPFFail)
+	debugf("  DKIM: Enable=%v Reject=%v", config.BasePolicy.EnableDKIM, config.BasePolicy.RejectOnDKIMFail)
+	debugf("  DMARC: Enable=%v Reject=%v", config.BasePolicy.EnableDMARC, config.BasePolicy.RejectOnDMARCFail)
+	debugf("  HeloMaxChanges=%d HeloTTLDays=%d", config.BasePolicy.HeloMaxChanges, int(math.Round(float64(config.HeloTTL)/86400)))
+	debugf("  Greylist: Enable=%v v4=/%d v6=/%d Wait=%dm UnmatchedTTLDays=%dd MatchedTTLDays=%dd",
+		config.BasePolicy.EnableGreylisting, config.GreylistIPv4Mask, config.GreylistIPv6Mask,
+		int(math.Round(float64(config.GreylistWait)/60)), int(math.Round(float64(config.GreylistUnmatchedTTL)/86400)), int(math.Round(float64(config.GreylistMatchedTTL)/86400)))
+
+	needsValkey := config.BasePolicy.HeloMaxChanges > 0 || config.BasePolicy.EnableGreylisting
+	var vc valkey.Client
+
+	if needsValkey {
+		if config.ValkeyURL == "" {
+			log.Fatalf("VALKEY_URL is required since HELO checking or Greylisting is enabled. Please set VALKEY_URL, or disable them to run without Valkey.")
+		}
+		opt, err := valkey.ParseURL(config.ValkeyURL)
+		if err != nil {
+			log.Fatalf("Invalid VALKEY_URL %s: %v", config.ValkeyURL, err)
+		}
+		vc, err = valkey.NewClient(opt)
+		if err != nil {
+			log.Fatalf("Failed to connect to valkey: %v", err)
+		}
+		defer vc.Close()
+		log.Println("Connected to Valkey.")
+	} else if config.ValkeyURL != "" {
+		log.Println("VALKEY_URL is provided, but HELO checking and Greylisting are disabled. Valkey connection will not be established.")
+	}
+
+	var db *sql.DB
+	if config.MysqlDSN != "" {
+		var err error
+		db, err = sql.Open("mysql", config.MysqlDSN)
+		if err != nil {
+			log.Fatalf("Failed to open MySQL connection: %v", err)
+		}
+		if err = db.Ping(); err != nil {
+			log.Fatalf("Failed to ping MySQL: %v", err)
+		}
+		log.Println("Connected to MySQL.")
+	} else {
+		log.Println("MYSQL_DSN is not set, Recipient Overrides disabled.")
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		log.Fatalf("Failed to listen on tcp://%s: %v", address, err)
+	}
+
+	wg := &sync.WaitGroup{}
+	trackedListener := &TrackedListener{Listener: listener, wg: wg}
+
+	server := milter.Server{
+		NewMilter: NewPolicyFilter(config, vc, db),
+		Actions:   milter.OptAddHeader | milter.OptChangeHeader, // Can add more if modifying email
+		Protocol:  0,
+	}
+
+	go func() {
+		if err := server.Serve(trackedListener); err != nil && err != milter.ErrServerClosed {
+			log.Fatalf("Server error: %v", err)
+		}
+	}()
+	log.Println("Milter server listening...")
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	<-sigc
+	log.Println("Shutting down listener...")
+
+	// Close listener to stop accepting new connections
+	trackedListener.Listener.Close()
+
+	log.Println("Waiting for active connections to drain...")
+	wg.Wait()
+
+	log.Println("All connections finished. Gracefully exiting.")
+}
+
+type TrackedListener struct {
+	net.Listener
+	wg *sync.WaitGroup
+}
+
+func (l *TrackedListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.wg.Add(1)
+	return &TrackedConn{Conn: conn, wg: l.wg}, nil
+}
+
+type TrackedConn struct {
+	net.Conn
+	wg     *sync.WaitGroup
+	closed bool
+	mu     sync.Mutex
+}
+
+func (c *TrackedConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		c.closed = true
+		c.wg.Done()
+	}
+	return c.Conn.Close()
+}

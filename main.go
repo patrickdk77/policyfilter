@@ -54,8 +54,6 @@ func parseNetworks(envs string) []*net.IPNet {
 	return nets
 }
 
-
-
 func main() {
 	log.Println("Starting Postfix Policy Filter (Milter) for SPF, DKIM, and DMARC")
 
@@ -64,16 +62,16 @@ func main() {
 		debugLog = true
 	}
 
-	policyConfigFile := os.Getenv("POLICY_CONFIG_FILE")
+	policyConfigFile := os.Getenv("CONFIG")
 	if policyConfigFile == "" {
 		policyConfigFile = "/etc/policyfilter.yaml"
 	}
-	
+
 	var yc *YAMLConfig
 	cfg, err := LoadPolicyTable(policyConfigFile)
 	if err != nil {
-		if os.Getenv("POLICY_CONFIG_FILE") != "" {
-			log.Printf("Warning: Failed to load POLICY_CONFIG_FILE %s: %v", policyConfigFile, err)
+		if os.Getenv("CONFIG") != "" {
+			log.Printf("Warning: Failed to load CONFIG %s: %v", policyConfigFile, err)
 		}
 	} else {
 		log.Printf("Loaded policies and configuration from %s", policyConfigFile)
@@ -83,34 +81,52 @@ func main() {
 	resolveBool := func(envKey string, yamlVal *bool, fallback bool) bool {
 		if val, ok := os.LookupEnv(envKey); ok {
 			val = strings.ToLower(val)
-			if b, err := strconv.ParseBool(val); err == nil { return b }
+			if b, err := strconv.ParseBool(val); err == nil {
+				return b
+			}
 		}
-		if yamlVal != nil { return *yamlVal }
+		if yamlVal != nil {
+			return *yamlVal
+		}
 		return fallback
 	}
 
 	resolveInt := func(envKey string, yamlVal *int, fallback int) int {
 		if val, ok := os.LookupEnv(envKey); ok {
-			if i, err := strconv.Atoi(val); err == nil { return i }
+			if i, err := strconv.Atoi(val); err == nil {
+				return i
+			}
 		}
-		if yamlVal != nil { return *yamlVal }
+		if yamlVal != nil {
+			return *yamlVal
+		}
 		return fallback
 	}
 
 	resolveStr := func(envKey string, yamlVal *string, fallback string) string {
-		if val, ok := os.LookupEnv(envKey); ok { return val }
-		if yamlVal != nil { return *yamlVal }
+		if val, ok := os.LookupEnv(envKey); ok {
+			return val
+		}
+		if yamlVal != nil {
+			return *yamlVal
+		}
 		return fallback
 	}
 
 	resolveAction := func(envKey string, enableYaml *bool, rejectYaml *bool, enableFallback, rejectFallback bool) (bool, bool) {
 		enable := enableFallback
 		reject := rejectFallback
-		if enableYaml != nil { enable = *enableYaml }
-		if rejectYaml != nil { reject = *rejectYaml }
+		if enableYaml != nil {
+			enable = *enableYaml
+		}
+		if rejectYaml != nil {
+			reject = *rejectYaml
+		}
 
 		val, ok := os.LookupEnv(envKey)
-		if !ok { return enable, reject }
+		if !ok {
+			return enable, reject
+		}
 
 		val = strings.ToLower(val)
 		switch val {
@@ -138,7 +154,7 @@ func main() {
 	var ycValkeyUrl, ycMysql, ycMilterAddr, ycWhite, ycHostname *string
 	var ycMaxMsg *int
 	var ycHeloTTL, ycGreyV4, ycGreyV6, ycGreyWait, ycGreyUn, ycGreyMat *int
-	
+
 	if yc != nil {
 		ycMaxMsg = yc.Config.MaxMessageSize
 		ycHostname = yc.Config.MailName

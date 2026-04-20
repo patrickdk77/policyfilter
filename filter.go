@@ -73,8 +73,10 @@ type PolicyConfig struct {
 type Config struct {
 	BasePolicy PolicyConfig
 
-	ValkeyURL string
-	MysqlDSN  string
+	ValkeyURL    string
+	MysqlDSN     string
+	MysqlQuery   string
+	MysqlCacheTTL int64
 	Hostname  string
 	HeloTTL   int64
 
@@ -101,7 +103,11 @@ type YAMLConfig struct {
 		WhitelistNetworks *string `yaml:"whitelistnetworks"`
 		MilterAddress     *string `yaml:"milteraddress"`
 		ValkeyUrl         *string `yaml:"valkeyurl"`
-		Mysql             *string `yaml:"mysql"`
+		Mysql             *struct {
+			DSN       *string `yaml:"dsn"`
+			Query     *string `yaml:"query"`
+			CacheMins *int    `yaml:"cachemins"`
+		} `yaml:"mysql"`
 		Report            *struct {
 			SMTP        *string `yaml:"smtp"`
 			OrgName     *string `yaml:"orgname"`
@@ -484,14 +490,36 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 		queryAddress := convertEmailToPunycode(rcpt)
 
 		var policyStr string
-		err := pf.db.QueryRow("SELECT policy FROM mail_virtual WHERE address = ? LIMIT 1", queryAddress).Scan(&policyStr)
-		if err == nil {
+		cacheHit := false
+
+		if pf.valkey != nil && pf.config.MysqlCacheTTL > 0 {
+			cacheKey := "policy_cache:" + queryAddress
+			ctxC := context.Background()
+			if cached, err := pf.valkey.Do(ctxC, pf.valkey.B().Get().Key(cacheKey).Build()).AsBytes(); err == nil {
+				policyStr = string(cached)
+				cacheHit = true
+				pf.debugf("Policy cache hit for %s: %s", queryAddress, policyStr)
+			}
+		}
+
+		if !cacheHit {
+			err := pf.db.QueryRow(pf.config.MysqlQuery, queryAddress).Scan(&policyStr)
+			if err != nil && err != sql.ErrNoRows {
+				pf.debugf("Error querying recipient policy for %s: %v", queryAddress, err)
+				policyStr = ""
+			} else if err == nil && pf.valkey != nil && pf.config.MysqlCacheTTL > 0 {
+				cacheKey := "policy_cache:" + queryAddress
+				ctxC := context.Background()
+				pf.valkey.Do(ctxC, pf.valkey.B().Set().Key(cacheKey).Value(policyStr).ExSeconds(pf.config.MysqlCacheTTL).Build())
+				pf.debugf("Policy cache set for %s: %s (TTL %ds)", queryAddress, policyStr, pf.config.MysqlCacheTTL)
+			}
+		}
+
+		if policyStr != "" {
 			if override, exists := PolicyTable[strings.ToLower(policyStr)]; exists {
 				pf.debugf("Applied policy '%s' for first recipient %s", policyStr, queryAddress)
 				pf.msg.policy = override
 			}
-		} else if err != sql.ErrNoRows {
-			pf.debugf("Error querying recipient policy for %s: %v", queryAddress, err)
 		}
 	}
 

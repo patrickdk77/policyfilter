@@ -158,6 +158,8 @@ func main() {
 	var ycValkeyUrl, ycMysql, ycMilterAddr, ycWhite, ycHostname *string
 	var ycReportSmtp, ycReportOrg, ycReportEmail, ycReportContact, ycReportDomain *string
 	var ycMaxMsg *int
+	var ycMysqlCacheTTL *int
+	var ycMysqlQuery *string
 	var ycHeloTTL, ycGreyV4, ycGreyV6, ycGreyWait, ycGreyUn, ycGreyMat *int
 
 	if yc != nil {
@@ -166,7 +168,11 @@ func main() {
 		ycWhite = yc.Config.WhitelistNetworks
 		ycMilterAddr = yc.Config.MilterAddress
 		ycValkeyUrl = yc.Config.ValkeyUrl
-		ycMysql = yc.Config.Mysql
+		if yc.Config.Mysql != nil {
+			ycMysql = yc.Config.Mysql.DSN
+			ycMysqlQuery = yc.Config.Mysql.Query
+			ycMysqlCacheTTL = yc.Config.Mysql.CacheMins
+		}
 		if yc.Config.Report != nil {
 			ycReportSmtp = yc.Config.Report.SMTP
 			ycReportOrg = yc.Config.Report.OrgName
@@ -217,6 +223,8 @@ func main() {
 		},
 		ValkeyURL:            resolveStr("VALKEY_URL", ycValkeyUrl, ""),
 		MysqlDSN:             resolveStr("MYSQL_DSN", ycMysql, ""),
+		MysqlQuery:           resolveStr("MYSQL_QUERY", ycMysqlQuery, "SELECT policy FROM mail_virtual WHERE address = ? LIMIT 1"),
+		MysqlCacheTTL:        int64(resolveInt("MYSQL_CACHE_MINS", ycMysqlCacheTTL, 0) * 60),
 		Hostname:             hostname,
 		HeloTTL:              int64(resolveInt("HELO_TTL_DAYS", ycHeloTTL, 14) * 86400),
 		GreylistIPv4Mask:     resolveInt("GREYLIST_IPV4_MASK", ycGreyV4, 24),

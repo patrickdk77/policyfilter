@@ -30,6 +30,8 @@ This application is configured natively through environment flags:
 - `MILTER_ADDRESS` (default `127.0.0.1:9998`)
 - `MAILNAME` (optional) - Identifies the host in `Authentication-Results` generated headers. Falls back to `HOSTNAME` and then `os.Hostname()`, the smtp server can override this.
 - `MYSQL_DSN` (optional, e.g. `user:pass@tcp(host:port)/dbname`)
+- `MYSQL_QUERY` (default `SELECT policy FROM mail_virtual WHERE address = ? LIMIT 1`) - SQL query used to look up per-recipient policy. Must return a single string column and accept one `?` placeholder for the address.
+- `MYSQL_CACHE_MINS` (default `0`, disabled) - Minutes to cache SQL policy results in Valkey. Requires `VALKEY_URL`.
 - `CONFIG` (optional, required if `MYSQL_DSN` is used. e.g. `/etc/policyfilter.yaml`)
 
 ### Valkey Config (HELO / Greylisting / DMARC Reporting)
@@ -69,7 +71,10 @@ config:
   whitelistnetworks: 127.0.0.0/8,::1/128
   milteraddress: 127.0.0.1:9998
   valkeyurl: valkey://127.0.0.1:6379/0
-  mysql: user:pass@tcp(host:port)/dbname
+  mysql:
+    dsn: user:pass@tcp(host:port)/dbname
+    query: "SELECT policy FROM mail_virtual WHERE address = ? LIMIT 1"
+    cachemins: 5
   report:
     smtp: smtp://user:pass@smtp.example.org:587
     orgname: Example ACME Corp

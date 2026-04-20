@@ -61,7 +61,7 @@ ENABLE_DKIM=false ENABLE_SPF=reject ENABLE_GREYLISTING=true ./policyfilter
 
 ### External Dynamic Policy Configuration (YAML)
 
-When `MYSQL_DSN` is set, the application expects `CONFIG` to map database string keys natively to policy overrides. Example `policies.yaml`:
+When `MYSQL_DSN` is set, the application expects `CONFIG` to map database string keys natively to policy overrides (profiles). `/etc/policyfilter.yaml`:
 ```yaml
 config:
   maxmessagesize: 10485760
@@ -71,8 +71,8 @@ config:
   valkeyurl: valkey://127.0.0.1:6379/0
   mysql: user:pass@tcp(host:port)/dbname
   report:
-    smtp: smtp://user:pass@smtp.example.com:587
-    orgname: Example Org
+    smtp: smtp://user:pass@smtp.example.org:587
+    orgname: Example ACME Corp
     email: dmarcreports@example.org
     domain: example.org
     contactinfo: https://example.org/dmarc
@@ -121,7 +121,7 @@ profiles:
     GreylistWhitelistCount: 10
 ```
 
-If `MYSQL_DSN` is set and `CONFIG` is missing, the backend database engine will disable itself. If `MYSQL_DSN` is not provided, or defined in the config file, the `CONFIG` is ignored safely.
+If `MYSQL_DSN` is set and `CONFIG` is missing, the backend database engine will disable itself. If `MYSQL_DSN` is not provided, or defined in the config file, the profiles are not used, except for the default profile.
 
 ### Postfix Integration
 

@@ -14,6 +14,7 @@ import (
 	"net/mail"
 	"net/smtp"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -263,7 +264,7 @@ func generateDailyReport(config *Config, vc valkey.Client, yc *YAMLConfig) {
 				authHost := fmt.Sprintf("%s._report._dmarc.%s", domain, targetEmailDomain)
 				txts, err := net.LookupTXT(authHost)
 				if err != nil {
-					log.Printf("DMARC report auth check failed for %s (querying %s): %v — skipping", addr, authHost, err)
+					log.Printf("DMARC report auth check failed for %s (querying %s): %v - skipping", addr, authHost, err)
 					continue
 				}
 				authorized := false
@@ -274,7 +275,7 @@ func generateDailyReport(config *Config, vc valkey.Client, yc *YAMLConfig) {
 					}
 				}
 				if !authorized {
-					log.Printf("DMARC report not authorized for %s (no v=DMARC1 at %s) — skipping", addr, authHost)
+					log.Printf("DMARC report not authorized for %s (no v=DMARC1 at %s) - skipping", addr, authHost)
 					continue
 				}
 				smtpTargets = append(smtpTargets, addr)
@@ -284,6 +285,47 @@ func generateDailyReport(config *Config, vc valkey.Client, yc *YAMLConfig) {
 		}
 
 		if len(smtpTargets) > 0 {
+			// Build human-readable summary
+			var summary strings.Builder
+			summary.WriteString("DMARC Aggregate Report\r\n")
+			summary.WriteString("======================\r\n")
+			summary.WriteString(fmt.Sprintf("Report ID    : %s\r\n", feedback.ReportMetadata.ReportID))
+			summary.WriteString(fmt.Sprintf("Submitted By : %s\r\n", config.ReportDomain))
+			summary.WriteString(fmt.Sprintf("Domain       : %s\r\n", domain))
+			summary.WriteString(fmt.Sprintf("Period       : %s - %s UTC\r\n",
+				time.Unix(feedback.ReportMetadata.DateRange.Begin, 0).UTC().Format("2006-01-02 15:04"),
+				time.Unix(feedback.ReportMetadata.DateRange.End, 0).UTC().Format("2006-01-02 15:04")))
+			summary.WriteString(fmt.Sprintf("Policy ADKIM : %s  ASPF: %s  p: %s  sp: %s  pct: %d\r\n",
+				feedback.PolicyPublished.ADKIM, feedback.PolicyPublished.ASPF,
+				feedback.PolicyPublished.P, feedback.PolicyPublished.SP, feedback.PolicyPublished.Pct))
+			summary.WriteString(fmt.Sprintf("\r\n%-40s  %6s  %-12s  %-6s  %-6s\r\n", "Source IP", "Count", "Disposition", "DKIM", "SPF"))
+			summary.WriteString(strings.Repeat("-", 80) + "\r\n")
+			pass, fail := 0, 0
+			sort.Slice(feedback.Record, func(i, j int) bool {
+				si := feedback.Record[i].Row.PolicyEvaluated.SPF
+				sj := feedback.Record[j].Row.PolicyEvaluated.SPF
+				if si != sj {
+					return si < sj
+				}
+				return feedback.Record[i].Row.PolicyEvaluated.DKIM < feedback.Record[j].Row.PolicyEvaluated.DKIM
+			})
+			for _, rec := range feedback.Record {
+				summary.WriteString(fmt.Sprintf("%-40s  %6d  %-12s  %-6s  %-6s\r\n",
+					rec.Row.SourceIP,
+					rec.Row.Count,
+					rec.Row.PolicyEvaluated.Disposition,
+					rec.Row.PolicyEvaluated.DKIM,
+					rec.Row.PolicyEvaluated.SPF))
+				if rec.Row.PolicyEvaluated.Disposition == "none" {
+					pass += rec.Row.Count
+				} else {
+					fail += rec.Row.Count
+				}
+			}
+			summary.WriteString(strings.Repeat("-", 80) + "\r\n")
+			summary.WriteString(fmt.Sprintf("Totals: %d passed, %d failed\r\n", pass, fail))
+			summary.WriteString("\r\nThe full XML report is attached.\r\n")
+
 			fromAddr := mail.Address{Name: "DMARC Reporter", Address: "noreply@" + config.ReportDomain}
 			boundary := "dmarc-bnd-12345"
 
@@ -294,7 +336,7 @@ func generateDailyReport(config *Config, vc valkey.Client, yc *YAMLConfig) {
 			msg.WriteString(fmt.Sprintf("MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"%s\"\r\n\r\n", boundary))
 			msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
 			msg.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\n\r\n")
-			msg.WriteString("Attached is an automated DMARC aggregate report.\r\n\r\n")
+			msg.WriteString(summary.String())
 
 			msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
 			msg.WriteString("Content-Type: application/gzip\r\n")

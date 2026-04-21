@@ -511,7 +511,7 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 				cacheKey := "policy_cache:" + queryAddress
 				ctxC := context.Background()
 				pf.valkey.Do(ctxC, pf.valkey.B().Set().Key(cacheKey).Value(policyStr).ExSeconds(pf.config.MysqlCacheTTL).Build())
-				pf.debugf("Policy cache set for %s: %s (TTL %ds)", queryAddress, policyStr, pf.config.MysqlCacheTTL)
+				//pf.debugf("Policy cache set for %s: %s (TTL %ds)", queryAddress, policyStr, pf.config.MysqlCacheTTL)
 			}
 		}
 

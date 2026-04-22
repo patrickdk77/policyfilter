@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/mail"
 	"net/textproto"
 	"os"
 	"strconv"
@@ -461,13 +462,30 @@ func convertEmailToPunycode(email string) string {
 }
 
 func extractDomainFromAddress(addr string) string {
+	// Unfold RFC 2822 folded header whitespace (CRLF + WSP)
+	addr = strings.ReplaceAll(addr, "\r\n", " ")
+	addr = strings.ReplaceAll(addr, "\n", " ")
+	addr = strings.TrimSpace(addr)
+
+	// Use the standard library parser which handles display names and angle brackets
+	if parsed, err := mail.ParseAddress(addr); err == nil {
+		addr = parsed.Address
+	} else {
+		// Fallback: extract content inside angle brackets if present
+		if start := strings.LastIndex(addr, "<"); start != -1 {
+			if end := strings.Index(addr[start:], ">"); end != -1 {
+				addr = addr[start+1 : start+end]
+			}
+		}
+	}
+
 	parts := strings.SplitN(addr, "@", 2)
 	if len(parts) == 2 {
-		domain := strings.TrimRight(strings.TrimSpace(parts[1]), "<> ")
+		domain := strings.ToLower(strings.TrimSpace(parts[1]))
 		if asciiDomain, err := idna.ToASCII(domain); err == nil {
-			return strings.ToLower(asciiDomain)
+			return asciiDomain
 		}
-		return strings.ToLower(domain)
+		return domain
 	}
 	return ""
 }

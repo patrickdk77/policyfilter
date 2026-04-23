@@ -48,6 +48,13 @@ update:
 
 deps:
 	GOPROXY=direct go mod vendor
+	$(MAKE) vendor-patch
+
+vendor-patch:
+	@for p in patches/*.patch; do \
+		echo "Applying $$p ..."; \
+		patch -p0 --forward --reject-file=- < $$p || exit 1; \
+	done
 
 test:
 	@docker run --rm -it -v "${PWD}:/go/src/policyfilter/" \

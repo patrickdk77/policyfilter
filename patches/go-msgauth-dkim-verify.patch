@@ -1,0 +1,96 @@
+--- vendor/github.com/emersion/go-msgauth/dkim/verify.go.orig	2026-03-28 11:40:38.436382665 -0400
++++ vendor/github.com/emersion/go-msgauth/dkim/verify.go	2026-04-22 23:47:35.866460782 -0400
+@@ -9,7 +9,6 @@
+ 	"fmt"
+ 	"io"
+ 	"io/ioutil"
+-	"regexp"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -221,7 +220,7 @@
+ 		return verif, permFailError("incompatible signature version")
+ 	}
+ 
+-	verif.Domain = stripWhitespace(params["d"])
++	verif.Domain = strings.ToLower(stripWhitespace(params["d"]))
+ 
+ 	for _, tag := range requiredTags {
+ 		if _, ok := params[tag]; !ok {
+@@ -231,7 +230,8 @@
+ 
+ 	if i, ok := params["i"]; ok {
+ 		verif.Identifier = stripWhitespace(i)
+-		if !strings.HasSuffix(verif.Identifier, "@"+verif.Domain) && !strings.HasSuffix(verif.Identifier, "."+verif.Domain) {
++		identifierLower := strings.ToLower(verif.Identifier)
++		if !strings.HasSuffix(identifierLower, "@"+verif.Domain) && !strings.HasSuffix(identifierLower, "."+verif.Domain) {
+ 			return verif, permFailError("domain mismatch")
+ 		}
+ 	} else {
+@@ -455,8 +455,63 @@
+ 	}, s)
+ }
+ 
+-var sigRegex = regexp.MustCompile(`(b\s*=)[^;]+`)
+-
++// removeSignature zeroes the value of the "b" tag (the signature) in a
++// DKIM-Signature header field value. It walks the tag list character by
++// character so that it cannot accidentally match "bh" or any other tag that
++// happens to contain "b=".
+ func removeSignature(s string) string {
+-	return sigRegex.ReplaceAllString(s, "$1")
++	var out strings.Builder
++	out.Grow(len(s))
++
++	i := 0
++	for i < len(s) {
++		// Skip leading whitespace before the tag name.
++		start := i
++		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') {
++			i++
++		}
++
++		// Collect the tag name.
++		nameStart := i
++		for i < len(s) && s[i] != '=' && s[i] != ';' {
++			i++
++		}
++		name := strings.TrimRight(s[nameStart:i], " \t\r\n")
++
++		if i >= len(s) || s[i] != '=' {
++			// No '=' found; emit what we have and move on.
++			out.WriteString(s[start:i])
++			if i < len(s) {
++				out.WriteByte(s[i])
++				i++
++			}
++			continue
++		}
++
++		// Emit everything up to and including the '='.
++		out.WriteString(s[start : i+1])
++		i++ // consume '='
++
++		// Find the end of the value (next ';' or end of string).
++		valEnd := i
++		for valEnd < len(s) && s[valEnd] != ';' {
++			valEnd++
++		}
++
++		if name == "b" {
++			// Zero the value: leave only whitespace so the field is still
++			// syntactically valid.
++			// (The RFC only requires that the value be cleared; empty is fine.)
++		} else {
++			out.WriteString(s[i:valEnd])
++		}
++		i = valEnd
++
++		if i < len(s) {
++			out.WriteByte(s[i]) // the ';'
++			i++
++		}
++	}
++
++	return out.String()
+ }

@@ -12,11 +12,17 @@ ARG BUILD_DATE
 ARG BUILD_REF
 ARG BUILD_GOARCH
 ARG BUILD_GOOS
-RUN for p in patches/*.patch; do \
-      echo "Applying $p ..." && patch -p0 --forward --reject-file=- < "$p"; \
-    done && \
-    CGO_ENABLED=0 go build -mod=vendor \
-      -ldflags "-s -w" -o /app
+RUN if [ ! -d vendor ]; then \
+      GOPROXY=direct go mod download && go mod verify && go mod vendor; \
+    fi && \
+    for p in patches/*.patch; do \
+      if patch -p0 --dry-run --reverse --silent < "$p" 2>/dev/null; then \
+        echo "Patch already applied: $p"; \
+      else \
+        echo "Applying patch: $p" && patch -p0 < "$p" || exit 1; \
+      fi; \
+    done
+RUN CGO_ENABLED=0 go build -mod=vendor -ldflags "-s -w" -o /app
 
 FROM scratch
 COPY --from=builder /app /policyfilter

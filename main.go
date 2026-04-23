@@ -225,6 +225,8 @@ func main() {
 			HeloMaxChanges:          resolveInt("HELO_MAX_CHANGES", dfltOvr.HeloMaxChanges, 0),
 			GreylistWhitelistCount:  resolveInt("GREYLIST_WHITELIST_COUNT", dfltOvr.GreylistWhitelistCount, 0),
 			DelayGreylisting:        resolveBool("DELAY_GREYLISTING", dfltOvr.DelayGreylisting, true),
+			SPFSoftFailAsPass:       resolveBool("SPF_SOFTFAIL_AS_PASS", dfltOvr.SPFSoftFailAsPass, false),
+			SPFNeutralAsPass:        resolveBool("SPF_NEUTRAL_AS_PASS", dfltOvr.SPFNeutralAsPass, false),
 		},
 		ValkeyURL:            resolveStr("VALKEY_URL", ycValkeyUrl, ""),
 		MysqlDSN:             resolveStr("MYSQL_DSN", ycMysql, ""),

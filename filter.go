@@ -69,6 +69,8 @@ type PolicyConfig struct {
 	HeloMaxChanges          int
 	GreylistWhitelistCount  int
 	DelayGreylisting        bool
+	SPFSoftFailAsPass       bool
+	SPFNeutralAsPass        bool
 }
 
 type Config struct {
@@ -150,6 +152,8 @@ type OverridePolicy struct {
 	HeloMaxChanges          *int  `yaml:"HeloMaxChanges"`
 	GreylistWhitelistCount  *int  `yaml:"GreylistWhitelistCount"`
 	DelayGreylisting        *bool `yaml:"DelayGreylisting"`
+	SPFSoftFailAsPass       *bool `yaml:"SPFSoftFailAsPass"`
+	SPFNeutralAsPass        *bool `yaml:"SPFNeutralAsPass"`
 }
 
 type Message struct {
@@ -164,6 +168,7 @@ type Message struct {
 	spfEvaluated    bool
 	spfResult       spf.Result
 	spfErr          error
+	spfEffectivePass bool
 	greylistDelayed bool
 }
 
@@ -198,6 +203,19 @@ type PolicyFilter struct {
 }
 
 var PolicyTable map[string]PolicyConfig
+
+// setSpfResult stores the SPF verification result and pre-computes
+// spfEffectivePass — whether the result counts as a pass for non-DMARC
+// decisions (rejections, greylisting) — according to the active policy flags.
+// Call this exactly once per message, at the moment of SPF evaluation.
+func (pf *PolicyFilter) setSpfResult(result spf.Result, err error) {
+	pf.msg.spfResult = result
+	pf.msg.spfErr = err
+	pf.msg.spfEvaluated = true
+	pf.msg.spfEffectivePass = result == spf.Pass ||
+		(result == spf.SoftFail && pf.msg.policy.SPFSoftFailAsPass) ||
+		(result == spf.Neutral && pf.msg.policy.SPFNeutralAsPass)
+}
 
 func LoadPolicyTable(filePath string) (*YAMLConfig, error) {
 	data, err := os.ReadFile(filePath)
@@ -558,14 +576,14 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 			spf.OverrideLookupLimit(pf.config.MaxSPFDNSLookups),
 			spf.OverrideVoidLookupLimit(pf.config.MaxSPFVoidLookups),
 		}
-		pf.msg.spfResult, pf.msg.spfErr = spf.CheckHostWithSender(pf.ip, pf.heloName, pf.msg.sender, spfOpts...)
+		result, err := spf.CheckHostWithSender(pf.ip, pf.heloName, pf.msg.sender, spfOpts...)
+		pf.setSpfResult(result, err)
 		//pf.debugf("SPF Evaluated early during RcptTo: %v (err: %v)", pf.msg.spfResult, pf.msg.spfErr)
-		pf.msg.spfEvaluated = true
 	}
 
 	if pf.valkey != nil && pf.msg.policy.EnableGreylisting {
-		if pf.msg.spfEvaluated && pf.msg.spfResult == spf.Pass {
-			pf.debugf("Skipping greylisting because SPF passed.")
+		if pf.msg.spfEvaluated && pf.msg.spfEffectivePass {
+			pf.debugf("Skipping greylisting because SPF passed (result: %v).", pf.msg.spfResult)
 			return milter.RespContinue, nil
 		}
 
@@ -674,18 +692,19 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 
 	pf.debugf("Processing message from %s (IP: %s)", pf.msg.sender, pf.ip)
 
-	bypassRejections := pf.msg.policy.EnableNullSenders && pf.msg.isNullSender
+	policy := pf.msg.policy
+	bypassRejections := policy.EnableNullSenders && pf.msg.isNullSender
 	var dkimPass bool = false
 	var dmarcPass bool = false
 
 	var spfErr error = pf.msg.spfErr
 	var spfResult spf.Result = pf.msg.spfResult
-	if pf.msg.policy.EnableSPF {
+	if policy.EnableSPF {
 		if !pf.msg.spfEvaluated {
-			spfResult, spfErr = spf.CheckHostWithSender(pf.ip, pf.heloName, pf.msg.sender)
-			pf.msg.spfResult = spfResult
-			pf.msg.spfErr = spfErr
-			pf.msg.spfEvaluated = true
+			result, err := spf.CheckHostWithSender(pf.ip, pf.heloName, pf.msg.sender)
+			pf.setSpfResult(result, err)
+			spfResult = result
+			spfErr = err
 		}
 		pf.debugf("SPF Result: %v (err: %v)", spfResult, spfErr)
 	}
@@ -693,7 +712,7 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 	// 2. DKIM Validation
 	var dkimDomains []string
 	var dkimResults []*dkim.Verification
-	if pf.msg.policy.EnableDKIM || pf.msg.policy.EnableDMARC {
+	if policy.EnableDKIM || policy.EnableDMARC {
 		// Read entire payload for signature scanning natively without buffering duplication
 		r := bytes.NewReader(pf.msg.msgBuf.Bytes())
 		verifications, err := dkim.Verify(r)
@@ -857,9 +876,12 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 		}
 	}
 
+	// effectiveSPFPass is pre-computed once when SPF is evaluated (see setSpfResult).
+	effectiveSPFPass := pf.msg.spfEffectivePass
+
 	// 4. Combined Authentication Check
 	if pf.msg.policy.EnableSPF && pf.msg.policy.EnableDKIM && pf.msg.policy.RejectOnUnauthenticated && !bypassRejections && !dmarcPass {
-		if spfResult != spf.Pass && spfResult != spf.SoftFail && spfResult != spf.Neutral && !dkimPass {
+		if !effectiveSPFPass && !dkimPass {
 			pf.debugf("Rejecting because neither SPF nor DKIM passed")
 			if spfResult == spf.TempError {
 				return milter.NewResponseStr('4', "4.7.1 Message is not authenticated (SPF/DKIM failed)"), nil
@@ -868,11 +890,8 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 		}
 	}
 
-	if pf.msg.policy.EnableSPF && pf.msg.policy.RejectOnSPFFail && !bypassRejections && !dmarcPass && (spfResult == spf.Fail) { // only reject on hard failure
+	if policy.EnableSPF && policy.RejectOnSPFFail && !bypassRejections && !dmarcPass && spfResult == spf.Fail {
 		pf.debugf("Rejecting message: SPF validation failed")
-		if spfResult == spf.TempError {
-			return milter.NewResponseStr('4', "4.7.1 SPF validation temporary error"), nil
-		}
 		return milter.NewResponseStr('5', "5.7.1 SPF validation failed"), nil
 	}
 
@@ -881,20 +900,21 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 		return milter.NewResponseStr('5', "5.7.1 DKIM signature missing or invalid"), nil
 	}
 
-	if spfResult != spf.Pass && !dmarcPass && !dkimPass && pf.msg.greylistDelayed {
+	if !effectiveSPFPass && !dmarcPass && !dkimPass && pf.msg.greylistDelayed {
 		pf.debugf("Applying delayed Greylisting rejection after payload analysis")
 		return milter.NewResponseStr('4', "4.7.1 Greylisted, please try again later"), nil
 	} else if pf.msg.greylistDelayed {
 		pf.debugf("Not applying delayed Greylisting rejection after payload analysis due to authentication")
 	}
 
-	if pf.msg.policy.EnableSPF || pf.msg.policy.EnableDKIM || pf.msg.policy.EnableDMARC {
-		hostname := pf.config.Hostname
-
-		ar := "Authentication-Results: " + hostname + ";"
+	if policy.EnableSPF || policy.EnableDKIM || policy.EnableDMARC {
+		var ar strings.Builder
+		ar.WriteString("Authentication-Results: ")
+		ar.WriteString(pf.config.Hostname)
+		ar.WriteByte(';')
 
 		// SPF entry
-		if pf.msg.policy.EnableSPF {
+		if policy.EnableSPF {
 			var resStr string
 			switch spfResult {
 			case spf.Pass:
@@ -906,14 +926,15 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 			default:
 				resStr = "none"
 			}
-			ar += fmt.Sprintf("\r\n       spf=%s (%s: domain of %s designates %s as permitted sender) smtp.mailfrom=%s;", resStr, hostname, pf.msg.sender, pf.ip.String(), pf.msg.sender)
+			fmt.Fprintf(&ar, "\r\n       spf=%s (%s: domain of %s designates %s as permitted sender) smtp.mailfrom=%s;",
+				resStr, pf.config.Hostname, pf.msg.sender, pf.ip.String(), pf.msg.sender)
 		}
 
 		// DKIM entry/entries
-		if pf.msg.policy.EnableDKIM {
-			dkimPassStr := "none"
-			var domain string
+		if policy.EnableDKIM {
 			if len(dkimResults) > 0 {
+				var dkimPassStr string
+				var domain string
 				valid := false
 				var errStr string
 				for _, v := range dkimResults {
@@ -930,24 +951,23 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 				} else {
 					dkimPassStr = "fail (" + errStr + ")"
 				}
-				ar += fmt.Sprintf("\r\n       dkim=%s header.i=@%s;", dkimPassStr, domain)
+				fmt.Fprintf(&ar, "\r\n       dkim=%s header.i=@%s;", dkimPassStr, domain)
 			}
 		}
 
 		// DMARC entry
-		if pf.msg.policy.EnableDMARC && fromDomain != "" {
+		if policy.EnableDMARC && fromDomain != "" {
 			dmarcResStr := "fail"
 			if dmarcPass {
 				dmarcResStr = "pass"
 			} else if dmarcRecord == nil {
-				dmarcResStr = "none" // no policy or query error
+				dmarcResStr = "none"
 			}
-
-			ar += fmt.Sprintf("\r\n       dmarc=%s header.from=%s;", dmarcResStr, fromDomain)
+			fmt.Fprintf(&ar, "\r\n       dmarc=%s header.from=%s;", dmarcResStr, fromDomain)
 		}
 
 		// BIMI
-		if pf.msg.policy.EnableDMARC && fromDomain != "" {
+		if policy.EnableDMARC && fromDomain != "" {
 			bimiPassStr := "skipped"
 			if dmarcPass {
 				bimiPassStr = "none"
@@ -976,7 +996,7 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 					bimiPassStr = "pass"
 				}
 			}
-			ar += fmt.Sprintf("\r\n       bimi=%s header.d=%s;", bimiPassStr, fromDomain)
+			fmt.Fprintf(&ar, "\r\n       bimi=%s header.d=%s;", bimiPassStr, fromDomain)
 		}
 
 		// IPRev
@@ -1006,23 +1026,25 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 			} else if pf.ip != nil {
 				ptrPart = fmt.Sprintf(" smtp.remote-ip=%s", pf.ip.String())
 			}
-			ar += fmt.Sprintf("\r\n       iprev=%s%s;", iprevRes, ptrPart)
+			fmt.Fprintf(&ar, "\r\n       iprev=%s%s;", iprevRes, ptrPart)
 		}
 
 		// TLS
 		if pf.tlsVersion != "" {
-			tlsPart := fmt.Sprintf(" tls.version=%s", pf.tlsVersion)
+			var tlsPart strings.Builder
+			fmt.Fprintf(&tlsPart, " tls.version=%s", pf.tlsVersion)
 			if pf.cipher != "" {
-				tlsPart += fmt.Sprintf(" tls.cipher=%s", pf.cipher)
+				fmt.Fprintf(&tlsPart, " tls.cipher=%s", pf.cipher)
 			}
 			if pf.cipherBits != "" {
-				tlsPart += fmt.Sprintf(" tls.bits=%s", pf.cipherBits)
+				fmt.Fprintf(&tlsPart, " tls.bits=%s", pf.cipherBits)
 			}
-			ar += fmt.Sprintf("\r\n       tls=pass%s;", tlsPart)
+			fmt.Fprintf(&ar, "\r\n       tls=pass%s;", tlsPart.String())
 		}
 
-		ar = strings.TrimSuffix(ar, ";")
-		m.AddHeader("Authentication-Results", ar)
+		// Strip trailing ';' and emit header
+		headerVal := strings.TrimSuffix(ar.String(), ";")
+		m.AddHeader("Authentication-Results", headerVal)
 	}
 
 	return milter.RespAccept, nil

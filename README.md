@@ -23,6 +23,8 @@ This application is configured natively through environment flags:
 
 - `REJECT_UNAUTHENTICATED` (default `true`) - Enforces 5.7.1 rejection if both SPF and DKIM fail together, without dmarc record.
 - `ENABLE_NULL_SENDERS` (default `true`) - Bypass authentication rejections for null senders, bounces.
+- `SPF_SOFTFAIL_AS_PASS` (default `false`) - Treat SPF `softfail` as `pass` for standalone SPF checks (rejections, greylisting). Does **not** affect DMARC SPF alignment.
+- `SPF_NEUTRAL_AS_PASS` (default `false`) - Treat SPF `neutral` as `pass` for standalone SPF checks (rejections, greylisting). Does **not** affect DMARC SPF alignment.
 
 ### Server Config
 - `MAX_MESSAGE_SIZE` (default `10485760` / 10MB) - Caps the memory buffer from unbounded execution exploitation natively.
@@ -109,6 +111,8 @@ profiles:
     RejectOnUnauthenticated: false
     HeloMaxChanges: 0
     GreylistWhitelistCount: 0
+    SPFSoftFailAsPass: false
+    SPFNeutralAsPass: false
   bypass:
     EnableGreylist: false
     EnableNullSenders: true

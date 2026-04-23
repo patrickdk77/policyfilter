@@ -262,7 +262,7 @@ func generateDailyReport(config *Config, vc valkey.Client, yc *YAMLConfig) {
 					targetEmailDomain = addr[idx+1:]
 				}
 				// If the target email domain matches the reporting domain, it is self-authorized
-				if !strings.HasSuffix(targetEmailDomain, domain) {
+				if !strings.HasSuffix(targetEmailDomain, domain) && !strings.HasSuffix(domain, targetEmailDomain) {
 					authHost := fmt.Sprintf("%s._report._dmarc.%s", domain, targetEmailDomain)
 					txts, err := net.LookupTXT(authHost)
 					if err != nil {

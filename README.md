@@ -32,6 +32,8 @@ This application is configured natively through environment flags:
 - `MYSQL_DSN` (optional, e.g. `user:pass@tcp(host:port)/dbname`)
 - `MYSQL_QUERY` (default `SELECT policy FROM mail_virtual WHERE address = ? LIMIT 1`) - SQL query used to look up per-recipient policy. Must return a single string column and accept one `?` placeholder for the address.
 - `MYSQL_CACHE_MINS` (default `0`, disabled) - Minutes to cache SQL policy results in Valkey. Requires `VALKEY_URL`.
+- `MAX_SPF_DNS_LOOKUPS` (default `10`) - Maximum number of DNS lookups during SPF evaluation. RFC 7208 mandates 10; raise only if needed.
+- `MAX_SPF_VOID_LOOKUPS` (default `2`) - Maximum number of void (empty/NXDOMAIN) DNS lookups during SPF evaluation. RFC 7208 recommends 2.
 - `CONFIG` (optional, required if `MYSQL_DSN` is used. e.g. `/etc/policyfilter.yaml`)
 
 ### Valkey Config (HELO / Greylisting / DMARC Reporting)
@@ -90,6 +92,9 @@ config:
     unmatchedttldays: 2
     matchedttldays: 30
     delay: true
+  spf:
+    maxdnslookups: 10
+    maxvoidlookups: 2
 profiles:
   default:
     EnableSPF: true

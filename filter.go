@@ -95,6 +95,8 @@ type Config struct {
 	ReportEmail         string
 	ReportContactInfo   string
 	ReportDomain        string
+	MaxSPFDNSLookups    uint
+	MaxSPFVoidLookups   uint
 }
 
 type YAMLConfig struct {
@@ -127,6 +129,10 @@ type YAMLConfig struct {
 			MatchedTTLDays   *int  `yaml:"matchedttldays"`
 			Delay            *bool `yaml:"delay"`
 		} `yaml:"greylist"`
+		SPF *struct {
+			MaxDNSLookups  *int `yaml:"maxdnslookups"`
+			MaxVoidLookups *int `yaml:"maxvoidlookups"`
+		} `yaml:"spf"`
 	} `yaml:"config"`
 	Profiles map[string]OverridePolicy `yaml:"profiles"`
 }
@@ -548,7 +554,11 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 	}
 
 	if pf.msg.policy.EnableSPF && !pf.msg.spfEvaluated {
-		pf.msg.spfResult, pf.msg.spfErr = spf.CheckHostWithSender(pf.ip, pf.heloName, pf.msg.sender)
+		spfOpts := []spf.Option{
+			spf.OverrideLookupLimit(pf.config.MaxSPFDNSLookups),
+			spf.OverrideVoidLookupLimit(pf.config.MaxSPFVoidLookups),
+		}
+		pf.msg.spfResult, pf.msg.spfErr = spf.CheckHostWithSender(pf.ip, pf.heloName, pf.msg.sender, spfOpts...)
 		//pf.debugf("SPF Evaluated early during RcptTo: %v (err: %v)", pf.msg.spfResult, pf.msg.spfErr)
 		pf.msg.spfEvaluated = true
 	}

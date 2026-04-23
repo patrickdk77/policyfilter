@@ -161,6 +161,7 @@ func main() {
 	var ycMysqlCacheTTL *int
 	var ycMysqlQuery *string
 	var ycHeloTTL, ycGreyV4, ycGreyV6, ycGreyWait, ycGreyUn, ycGreyMat *int
+	var ycSPFMaxDNS, ycSPFMaxVoid *int
 
 	if yc != nil {
 		ycMaxMsg = yc.Config.MaxMessageSize
@@ -189,6 +190,10 @@ func main() {
 			ycGreyWait = yc.Config.Greylist.WaitMins
 			ycGreyUn = yc.Config.Greylist.UnmatchedTTLDays
 			ycGreyMat = yc.Config.Greylist.MatchedTTLDays
+		}
+		if yc.Config.SPF != nil {
+			ycSPFMaxDNS = yc.Config.SPF.MaxDNSLookups
+			ycSPFMaxVoid = yc.Config.SPF.MaxVoidLookups
 		}
 	}
 
@@ -239,6 +244,8 @@ func main() {
 		ReportEmail:          resolveStr("REPORT_EMAIL", ycReportEmail, "noreply@"+hostname),
 		ReportContactInfo:    resolveStr("REPORT_CONTACT_INFO", ycReportContact, ""),
 		ReportDomain:         resolveStr("REPORT_DOMAIN", ycReportDomain, hostname),
+		MaxSPFDNSLookups:     uint(resolveInt("MAX_SPF_DNS_LOOKUPS", ycSPFMaxDNS, 10)),
+		MaxSPFVoidLookups:    uint(resolveInt("MAX_SPF_VOID_LOOKUPS", ycSPFMaxVoid, 2)),
 	}
 
 	if config.MysqlDSN != "" && yc == nil {
@@ -250,7 +257,9 @@ func main() {
 
 	debugf("Configuration:")
 	debugf("  Listening on %s", address)
-	debugf("  SPF: Enable=%v Reject=%v", config.BasePolicy.EnableSPF, config.BasePolicy.RejectOnSPFFail)
+	debugf("  SPF: Enable=%v Reject=%v MaxDNSLookups=%d MaxVoidLookups=%d",
+		config.BasePolicy.EnableSPF, config.BasePolicy.RejectOnSPFFail,
+		config.MaxSPFDNSLookups, config.MaxSPFVoidLookups)
 	debugf("  DKIM: Enable=%v Reject=%v", config.BasePolicy.EnableDKIM, config.BasePolicy.RejectOnDKIMFail)
 	debugf("  DMARC: Enable=%v Reject=%v", config.BasePolicy.EnableDMARC, config.BasePolicy.RejectOnDMARCFail)
 	debugf("  HeloMaxChanges=%d HeloTTLDays=%d", config.BasePolicy.HeloMaxChanges, int(math.Round(float64(config.HeloTTL)/86400)))

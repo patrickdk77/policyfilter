@@ -261,22 +261,25 @@ func generateDailyReport(config *Config, vc valkey.Client, yc *YAMLConfig) {
 				if idx := strings.Index(addr, "@"); idx != -1 {
 					targetEmailDomain = addr[idx+1:]
 				}
-				authHost := fmt.Sprintf("%s._report._dmarc.%s", domain, targetEmailDomain)
-				txts, err := net.LookupTXT(authHost)
-				if err != nil {
-					log.Printf("DMARC report auth check failed for %s (querying %s): %v - skipping", addr, authHost, err)
-					continue
-				}
-				authorized := false
-				for _, txt := range txts {
-					if strings.Contains(strings.ToLower(txt), "v=dmarc1") {
-						authorized = true
-						break
+				// If the target email domain matches the reporting domain, it is self-authorized
+				if !strings.HasSuffix(targetEmailDomain, domain) {
+					authHost := fmt.Sprintf("%s._report._dmarc.%s", domain, targetEmailDomain)
+					txts, err := net.LookupTXT(authHost)
+					if err != nil {
+						log.Printf("DMARC report auth check failed for %s (querying %s): %v - skipping", addr, authHost, err)
+						continue
 					}
-				}
-				if !authorized {
-					log.Printf("DMARC report not authorized for %s (no v=DMARC1 at %s) - skipping", addr, authHost)
-					continue
+					authorized := false
+					for _, txt := range txts {
+						if strings.Contains(strings.ToLower(txt), "v=dmarc1") {
+							authorized = true
+							break
+						}
+					}
+					if !authorized {
+						log.Printf("DMARC report not authorized for %s (no v=DMARC1 at %s) - skipping", addr, authHost)
+						continue
+					}
 				}
 				smtpTargets = append(smtpTargets, addr)
 			} else if strings.HasPrefix(lowerURL, "http://") || strings.HasPrefix(lowerURL, "https://") {

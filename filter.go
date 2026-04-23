@@ -74,12 +74,12 @@ type PolicyConfig struct {
 type Config struct {
 	BasePolicy PolicyConfig
 
-	ValkeyURL    string
-	MysqlDSN     string
-	MysqlQuery   string
+	ValkeyURL     string
+	MysqlDSN      string
+	MysqlQuery    string
 	MysqlCacheTTL int64
-	Hostname  string
-	HeloTTL   int64
+	Hostname      string
+	HeloTTL       int64
 
 	GreylistIPv4Mask     int
 	GreylistIPv6Mask     int
@@ -109,14 +109,14 @@ type YAMLConfig struct {
 			Query     *string `yaml:"query"`
 			CacheMins *int    `yaml:"cachemins"`
 		} `yaml:"mysql"`
-		Report            *struct {
+		Report *struct {
 			SMTP        *string `yaml:"smtp"`
 			OrgName     *string `yaml:"orgname"`
 			Email       *string `yaml:"email"`
 			Domain      *string `yaml:"domain"`
 			ContactInfo *string `yaml:"contactinfo"`
 		} `yaml:"report"`
-		Helo              *struct {
+		Helo *struct {
 			TTLDays *int `yaml:"ttldays"`
 		} `yaml:"helo"`
 		Greylist *struct {
@@ -516,7 +516,7 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 			if cached, err := pf.valkey.Do(ctxC, pf.valkey.B().Get().Key(cacheKey).Build()).AsBytes(); err == nil {
 				policyStr = string(cached)
 				cacheHit = true
-				pf.debugf("Policy cache hit for %s: %s", queryAddress, policyStr)
+				//pf.debugf("Policy cache hit for %s: %s", queryAddress, policyStr)
 			}
 		}
 
@@ -535,7 +535,13 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 
 		if policyStr != "" {
 			if override, exists := PolicyTable[strings.ToLower(policyStr)]; exists {
-				pf.debugf("Applied policy '%s' for first recipient %s", policyStr, queryAddress)
+				cacheStr := ""
+				if cacheHit {
+					cacheStr = " (cache hit)"
+				} else if pf.valkey != nil && pf.config.MysqlCacheTTL > 0 {
+					cacheStr = " (cache miss)"
+				}
+				pf.debugf("Applied policy '%s' for first recipient %s%s", policyStr, queryAddress, cacheStr)
 				pf.msg.policy = override
 			}
 		}
@@ -735,7 +741,7 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 				if pf.msg.policy.EnableSPF {
 					if isAligned(fromDomain, senderDomain, dmarcRecord.SPFAlignment) {
 						if spfResult == spf.Pass {
-							pf.debugf("DMARC SPF aligned successfully")
+							//pf.debugf("DMARC SPF aligned successfully")
 							spfAligned = true
 						}
 					}
@@ -750,7 +756,7 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 					if dmarcPass {
 						disposition = "none"
 					}
-					
+
 					dkimDom := ""
 					dkimRes := "none"
 					if len(dkimResults) > 0 {
@@ -768,9 +774,12 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 
 					spfResStr := "none"
 					switch spfResult {
-					case spf.Pass: spfResStr = "pass"
-					case spf.Fail, spf.SoftFail: spfResStr = "fail"
-					case spf.PermError, spf.TempError: spfResStr = "error"
+					case spf.Pass:
+						spfResStr = "pass"
+					case spf.Fail, spf.SoftFail:
+						spfResStr = "fail"
+					case spf.PermError, spf.TempError:
+						spfResStr = "error"
 					}
 
 					stat := DmarcRuaStat{
@@ -781,7 +790,7 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 						SPFDomain:   senderDomain,
 						SPFResult:   spfResStr,
 					}
-					
+
 					if b, err := json.Marshal(stat); err == nil {
 						key := fmt.Sprintf("dmarc_rua:%s:%s", time.Now().Format("20060102"), fromDomain)
 						luaScript := `
@@ -795,7 +804,7 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 							redis.call('EXPIRE', KEYS[1], 180000)
 							return 1
 						`
-						
+
 						ruaStr := ""
 						if len(dmarcRecord.ReportURIAggregate) > 0 {
 							ruaStr = strings.Join(dmarcRecord.ReportURIAggregate, ",")
@@ -814,7 +823,7 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 							"sp":     string(dmarcRecord.SubdomainPolicy),
 							"pct":    pct,
 						})
-						
+
 						go func(k, s, r, pol string) {
 							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 							defer cancel()
@@ -824,9 +833,9 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 				}
 
 				if dmarcPass {
-					pf.debugf("DMARC validation passed")
+					pf.debugf("DMARC validation passed, SPF aligned: %t, DKIM aligned: %t", spfAligned, dkimAligned)
 				} else {
-					pf.debugf("DMARC validation failed or no passing/aligned signatures")
+					pf.debugf("DMARC validation failed or no passing/aligned signatures, SPF aligned: %t, DKIM aligned: %t", spfAligned, dkimAligned)
 					if pf.msg.policy.RejectOnDMARCFail && !bypassRejections && !dmarcPass && dmarcRecord.Policy == dmarc.PolicyReject {
 						pf.debugf("Rejecting message: DMARC policy failed, From: %v, Sender: %v, Rcpt: %v", fromDomain, senderDomain, pf.msg.firstRcpt)
 						return milter.NewResponseStr('5', "5.7.1 DMARC policy failed"), nil

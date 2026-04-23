@@ -4,7 +4,7 @@
 ARG BUILD_FROM_PREFIX
 
 FROM ${BUILD_FROM_PREFIX}golang:alpine AS builder
-RUN apk --no-cache add gcc musl-dev git
+RUN apk --no-cache add gcc musl-dev git patch
 WORKDIR /go/src/
 COPY . /go/src/
 ARG BUILD_VERSION
@@ -12,11 +12,11 @@ ARG BUILD_DATE
 ARG BUILD_REF
 ARG BUILD_GOARCH
 ARG BUILD_GOOS
-RUN export GOPROXY=direct \
- && go mod download \
- && go mod verify \
- && CGO_ENABLED=0 go build \
-    -ldflags "-s -w" -o /app
+RUN for p in patches/*.patch; do \
+      echo "Applying $p ..." && patch -p0 --forward --reject-file=- < "$p"; \
+    done && \
+    CGO_ENABLED=0 go build -mod=vendor \
+      -ldflags "-s -w" -o /app
 
 FROM scratch
 COPY --from=builder /app /policyfilter

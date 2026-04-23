@@ -1,5 +1,5 @@
---- vendor/github.com/emersion/go-msgauth/dkim/verify.go.orig	2026-03-28 11:40:38.436382665 -0400
-+++ vendor/github.com/emersion/go-msgauth/dkim/verify.go	2026-04-22 23:47:35.866460782 -0400
+--- vendor/github.com/emersion/go-msgauth/dkim/verify.go.orig
++++ vendor/github.com/emersion/go-msgauth/dkim/verify.go
 @@ -9,7 +9,6 @@
  	"fmt"
  	"io"
@@ -27,7 +27,31 @@
  			return verif, permFailError("domain mismatch")
  		}
  	} else {
-@@ -455,8 +455,63 @@
+@@ -292,6 +292,23 @@
+ 		return verif, permFailError("unsupported public key query method")
+ 	}
+ 
++	// Parse flags
++	for _, flag := range res.Flags {
++		switch flag {
++		case "y":
++			// Domain is testing DKIM; treat as neutral pass.
++			return verif, nil
++		case "s":
++			// The s flag means the i= identifier domain must exactly match the
++			// d= domain (subdomain delegation is not permitted).
++			// Use case-insensitive comparison consistent with RFC 4343 and
++			// how verif.Domain is already stored lowercased.
++			if !strings.HasSuffix(strings.ToLower(verif.Identifier), "@"+verif.Domain) {
++				return verif, permFailError("identifier and domain mismatch")
++			}
++		}
++	}
++
+ 	// Parse algos
+ 	keyAlgo, hashAlgo, ok := strings.Cut(stripWhitespace(params["a"]), "-")
+ 	if !ok {
+@@ -455,8 +472,63 @@
  	}, s)
  }
  

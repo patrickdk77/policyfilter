@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"database/sql"
 
@@ -276,10 +279,111 @@ func main() {
 		if config.ValkeyURL == "" {
 			log.Fatalf("VALKEY_URL is required since HELO checking or Greylisting is enabled. Please set VALKEY_URL, or disable them to run without Valkey.")
 		}
-		opt, err := valkey.ParseURL(config.ValkeyURL)
+
+		u, err := url.Parse(config.ValkeyURL)
 		if err != nil {
 			log.Fatalf("Invalid VALKEY_URL %s: %v", config.ValkeyURL, err)
 		}
+
+		var opt valkey.ClientOption
+		if u.Scheme == "valkey" || u.Scheme == "valkeys" {
+			opt, err = valkey.ParseURL(config.ValkeyURL)
+			if err != nil {
+				log.Fatalf("Invalid VALKEY_URL %s: %v", config.ValkeyURL, err)
+			}
+		} else if u.Scheme == "sentinel" {
+			host := u.Hostname()
+			port := u.Port()
+			if port == "" {
+				port = "26379" // default sentinel port
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ips4, _ := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+			ips6, _ := net.DefaultResolver.LookupIP(ctx, "ip6", host)
+
+			var ips []net.IP
+			ips = append(ips, ips4...)
+			ips = append(ips, ips6...)
+
+			if len(ips) == 0 {
+				log.Fatalf("Failed to lookup any IPv4 or IPv6 addresses for sentinel hostname %s", host)
+			}
+			var initAddrs []string
+			for _, ip := range ips {
+				addr := net.JoinHostPort(ip.String(), port)
+				conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+				if err == nil {
+					conn.Close()
+					initAddrs = append(initAddrs, addr)
+				} else {
+					log.Printf("Warning: Skipping sentinel at %s, failed to connect: %v", addr, err)
+				}
+			}
+			if len(initAddrs) == 0 {
+				log.Fatalf("Failed to connect to any sentinel IP addresses for hostname %s", host)
+			}
+
+			masterName := strings.TrimPrefix(u.Path, "/")
+			q := u.Query()
+
+			dbStr := q.Get("db")
+
+			if _, err := strconv.Atoi(masterName); err == nil {
+				if dbStr == "" {
+					dbStr = masterName
+				}
+				masterName = ""
+			}
+
+			if ms := q.Get("master_set"); ms != "" {
+				masterName = ms
+			}
+
+			if masterName == "" {
+				log.Fatalf("Sentinel master name must be provided in the URL path or master_set query parameter")
+			}
+
+			sentinelUser := ""
+			sentinelPass := ""
+			if u.User != nil {
+				sentinelUser = u.User.Username()
+				sentinelPass, _ = u.User.Password()
+			}
+
+			db := 0
+			if dbStr != "" {
+				db, err = strconv.Atoi(dbStr)
+				if err != nil {
+					log.Fatalf("Invalid database parameter in sentinel URL: %v", err)
+				}
+			}
+
+			valkeyPass := q.Get("pass")
+			if valkeyPass == "" {
+				valkeyPass = sentinelPass
+			}
+			
+			valkeyUser := q.Get("user")
+			if valkeyUser == "" {
+				valkeyUser = sentinelUser
+			}
+
+			opt = valkey.ClientOption{
+				InitAddress: initAddrs,
+				Sentinel: valkey.SentinelOption{
+					MasterSet: masterName,
+					Username:  sentinelUser,
+					Password:  sentinelPass,
+				},
+				Username: valkeyUser,
+				Password: valkeyPass,
+				SelectDB: db,
+			}
+		} else {
+			log.Fatalf("Unsupported VALKEY_URL scheme: %s", u.Scheme)
+		}
+
 		vc, err = valkey.NewClient(opt)
 		if err != nil {
 			log.Fatalf("Failed to connect to valkey: %v", err)

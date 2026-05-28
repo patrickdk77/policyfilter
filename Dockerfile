@@ -22,7 +22,7 @@ RUN if [ ! -d vendor ]; then \
         echo "Applying patch: $p" && patch -p0 < "$p" || exit 1; \
       fi; \
     done
-RUN CGO_ENABLED=0 go build -mod=vendor -ldflags "-s -w" -o /app
+RUN CGO_ENABLED=0 GOAMD64=v2 go build -mod=vendor -ldflags "-s -w" -o /app
 
 FROM scratch
 COPY --from=builder /app /policyfilter

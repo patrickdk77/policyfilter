@@ -205,8 +205,8 @@ type PolicyFilter struct {
 var PolicyTable map[string]PolicyConfig
 
 // setSpfResult stores the SPF verification result and pre-computes
-// spfEffectivePass — whether the result counts as a pass for non-DMARC
-// decisions (rejections, greylisting) — according to the active policy flags.
+// spfEffectivePass - whether the result counts as a pass for non-DMARC
+// decisions (rejections, greylisting) - according to the active policy flags.
 // Call this exactly once per message, at the moment of SPF evaluation.
 func (pf *PolicyFilter) setSpfResult(result spf.Result, err error) {
 	pf.msg.spfResult = result

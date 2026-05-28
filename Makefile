@@ -40,7 +40,7 @@ buildx:
 	skopeo copy --all docker://${IMAGE_NAME} docker://${DOCKER_REPO}:latest
 
 build:
-	docker build --pull --file ${DOCKERFILE_PATH} --tag ${IMAGE_NAME} .
+	CGO_ENABLED=0 GOAMD64=v2 go build -mod=vendor -ldflags "-s -w"
 
 update:
 	GOPROXY=direct go get -u

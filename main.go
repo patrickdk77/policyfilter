@@ -218,6 +218,7 @@ func main() {
 		BasePolicy: PolicyConfig{
 			EnableSPF:               enableSPF,
 			EnableDKIM:              enableDKIM,
+			EnableDKIMATPS:          resolveBool("ENABLE_DKIM_ATPS", dfltOvr.EnableDKIMATPS, false),
 			EnableDMARC:             enableDMARC,
 			EnableGreylisting:       resolveBool("ENABLE_GREYLISTING", dfltOvr.EnableGreylist, false),
 			EnableNullSenders:       resolveBool("ENABLE_NULL_SENDERS", dfltOvr.EnableNullSenders, true),
@@ -265,7 +266,7 @@ func main() {
 	debugf("  SPF: Enable=%v Reject=%v MaxDNSLookups=%d MaxVoidLookups=%d",
 		config.BasePolicy.EnableSPF, config.BasePolicy.RejectOnSPFFail,
 		config.MaxSPFDNSLookups, config.MaxSPFVoidLookups)
-	debugf("  DKIM: Enable=%v Reject=%v", config.BasePolicy.EnableDKIM, config.BasePolicy.RejectOnDKIMFail)
+	debugf("  DKIM: Enable=%v Reject=%v ATPS=%v", config.BasePolicy.EnableDKIM, config.BasePolicy.RejectOnDKIMFail, config.BasePolicy.EnableDKIMATPS)
 	debugf("  DMARC: Enable=%v Reject=%v", config.BasePolicy.EnableDMARC, config.BasePolicy.RejectOnDMARCFail)
 	debugf("  HeloMaxChanges=%d HeloTTLDays=%d", config.BasePolicy.HeloMaxChanges, int(math.Round(float64(config.HeloTTL)/86400)))
 	debugf("  Greylist: Enable=%v v4=/%d v6=/%d Wait=%dm UnmatchedTTLDays=%dd MatchedTTLDays=%dd",

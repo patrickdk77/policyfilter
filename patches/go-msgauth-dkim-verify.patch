@@ -8,17 +8,35 @@
  	"strconv"
  	"strings"
  	"time"
-@@ -221,7 +220,7 @@
+@@ -79,6 +78,17 @@
+ 	// The expiration time. If the signature doesn't expire, it's set to zero.
+ 	Expiration time.Time
+
++	// ATPSDomain is the value of the "atps" tag (RFC 6541 Authorized
++	// Third-Party Signatures), if present. It names the Author's ADMD that
++	// this signature claims to be authorized to sign on behalf of. Empty if
++	// the signature did not include an "atps" tag.
++	ATPSDomain string
++	// ATPSHashAlgo is the value of the "atpsh" tag: either "none" or a DKIM
++	// hash algorithm name. Only meaningful when ATPSDomain is non-empty. It
++	// is empty if the signature omitted a required "atpsh" tag despite
++	// including "atps".
++	ATPSHashAlgo string
++
+ 	// Err is nil if the signature is valid.
+ 	Err error
+ }
+@@ -221,7 +231,7 @@
  		return verif, permFailError("incompatible signature version")
  	}
- 
+
 -	verif.Domain = stripWhitespace(params["d"])
 +	verif.Domain = strings.ToLower(stripWhitespace(params["d"]))
- 
+
  	for _, tag := range requiredTags {
  		if _, ok := params[tag]; !ok {
-@@ -231,7 +230,8 @@
- 
+@@ -231,13 +241,22 @@
+
  	if i, ok := params["i"]; ok {
  		verif.Identifier = stripWhitespace(i)
 -		if !strings.HasSuffix(verif.Identifier, "@"+verif.Domain) && !strings.HasSuffix(verif.Identifier, "."+verif.Domain) {
@@ -27,10 +45,24 @@
  			return verif, permFailError("domain mismatch")
  		}
  	} else {
-@@ -292,6 +292,23 @@
+ 		verif.Identifier = "@" + verif.Domain
+ 	}
+
++	// RFC 6541 Authorized Third-Party Signatures: surface the "atps"/"atpsh"
++	// tags for callers to evaluate. This is purely additive metadata and
++	// does not affect whether the signature itself verifies.
++	if atps, ok := params["atps"]; ok {
++		verif.ATPSDomain = strings.ToLower(stripWhitespace(atps))
++		verif.ATPSHashAlgo = strings.ToLower(stripWhitespace(params["atpsh"]))
++	}
++
+ 	headerKeys := parseTagList(params["h"])
+ 	ok := false
+ 	for _, k := range headerKeys {
+@@ -292,6 +311,23 @@
  		return verif, permFailError("unsupported public key query method")
  	}
- 
+
 +	// Parse flags
 +	for _, flag := range res.Flags {
 +		switch flag {
@@ -51,10 +83,10 @@
  	// Parse algos
  	keyAlgo, hashAlgo, ok := strings.Cut(stripWhitespace(params["a"]), "-")
  	if !ok {
-@@ -455,8 +472,63 @@
+@@ -455,8 +491,63 @@
  	}, s)
  }
- 
+
 -var sigRegex = regexp.MustCompile(`(b\s*=)[^;]+`)
 -
 +// removeSignature zeroes the value of the "b" tag (the signature) in a

@@ -59,6 +59,7 @@ var sld = map[string][]string{
 type PolicyConfig struct {
 	EnableSPF               bool
 	EnableDKIM              bool
+	EnableDKIMATPS          bool
 	EnableDMARC             bool
 	EnableGreylisting       bool
 	EnableNullSenders       bool
@@ -142,6 +143,7 @@ type YAMLConfig struct {
 type OverridePolicy struct {
 	EnableSPF               *bool `yaml:"EnableSPF"`
 	EnableDKIM              *bool `yaml:"EnableDKIM"`
+	EnableDKIMATPS          *bool `yaml:"EnableDKIMATPS"`
 	EnableDMARC             *bool `yaml:"EnableDMARC"`
 	EnableGreylist          *bool `yaml:"EnableGreylist"`
 	EnableNullSenders       *bool `yaml:"EnableNullSenders"`
@@ -233,6 +235,7 @@ func LoadPolicyTable(filePath string) (*YAMLConfig, error) {
 		mergedDefault := PolicyConfig{
 			EnableSPF:               true,
 			EnableDKIM:              true,
+			EnableDKIMATPS:          false,
 			EnableDMARC:             true,
 			EnableGreylisting:       false,
 			DelayGreylisting:        true,
@@ -262,6 +265,9 @@ func mergeOverride(mergedPolicy *PolicyConfig, ovr OverridePolicy) {
 	}
 	if ovr.EnableDKIM != nil {
 		mergedPolicy.EnableDKIM = *ovr.EnableDKIM
+	}
+	if ovr.EnableDKIMATPS != nil {
+		mergedPolicy.EnableDKIMATPS = *ovr.EnableDKIMATPS
 	}
 	if ovr.EnableDMARC != nil {
 		mergedPolicy.EnableDMARC = *ovr.EnableDMARC
@@ -737,143 +743,166 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 		}
 	}
 
+	// Extract domain from 'From' header once; shared by ATPS and DMARC below.
+	fromDomain := ""
+	if pf.msg.from != "" && (policy.EnableDMARC || policy.EnableDKIMATPS) {
+		fromDomain = extractDomainFromAddress(pf.msg.from)
+	}
+
+	// 2b. ATPS (RFC 6541 Authorized Third-Party Signatures)
+	//
+	// Confirms via DNS whether a DKIM signature signed by a third party
+	// (d= domain different from the From domain) was explicitly authorized
+	// by the Author's ADMD to sign on its behalf. A confirmed signature is
+	// treated as DKIM-DMARC-aligned per RFC 6541 Section 5, even though its
+	// d= domain doesn't itself align with the From domain.
+	atpsOverall := atpsNone
+	var atpsAuthorizedDomains map[string]bool
+	if policy.EnableDKIM && policy.EnableDKIMATPS && fromDomain != "" {
+		atpsOverall, atpsAuthorizedDomains = pf.evaluateATPS(dkimResults, fromDomain)
+	}
+
 	// 3. DMARC Validation
 	var dmarcRecord *dmarc.Record
-	fromDomain := ""
-	if pf.msg.policy.EnableDMARC && pf.msg.from != "" {
-		// Extract domain from 'From' header
-		fromDomain = extractDomainFromAddress(pf.msg.from)
-		if fromDomain != "" {
-			var dmarcErr error
-			dmarcRecord, dmarcErr = dmarc.Lookup(fromDomain)
-			if dmarcErr != nil {
-				pf.debugf("DMARC Lookup error for domain %s: %v", fromDomain, dmarcErr)
-			} else {
-				pf.debugf("DMARC Record for %s: %+v", fromDomain, dmarcRecord)
+	if pf.msg.policy.EnableDMARC && fromDomain != "" {
+		var dmarcErr error
+		dmarcRecord, dmarcErr = dmarc.Lookup(fromDomain)
+		if dmarcErr != nil {
+			pf.debugf("DMARC Lookup error for domain %s: %v", fromDomain, dmarcErr)
+		} else {
+			pf.debugf("DMARC Record for %s: %+v", fromDomain, dmarcRecord)
 
-				// Very basic DMARC evaluation
-				// Checks if either SPF or DKIM passed in alignment with From domain
-				spfAligned := false
-				dkimAligned := false
+			// Very basic DMARC evaluation
+			// Checks if either SPF or DKIM passed in alignment with From domain
+			spfAligned := false
+			dkimAligned := false
 
-				// Check DKIM Alignment
-				if dkimPass {
-					for _, d := range dkimDomains {
-						if isAligned(fromDomain, d, dmarcRecord.DKIMAlignment) {
-							dkimAligned = true
-							break
-						}
+			// Check DKIM Alignment
+			if dkimPass {
+				for _, d := range dkimDomains {
+					if isAligned(fromDomain, d, dmarcRecord.DKIMAlignment) {
+						dkimAligned = true
+						break
 					}
 				}
 
-				senderDomain := extractDomainFromAddress(pf.msg.sender)
-				if pf.msg.policy.EnableSPF {
-					if isAligned(fromDomain, senderDomain, dmarcRecord.SPFAlignment) {
-						if spfResult == spf.Pass {
-							//pf.debugf("DMARC SPF aligned successfully")
-							spfAligned = true
-						}
-					}
+				// RFC 6541 Section 5: a DKIM signature confirmed as an
+				// Authorized Third-Party Signature is evaluated as though
+				// it were a valid signature from the Author's ADMD, even
+				// when its d= domain doesn't itself align with fromDomain.
+				if !dkimAligned && len(atpsAuthorizedDomains) > 0 {
+					dkimAligned = true
+					pf.debugf("DKIM alignment satisfied via ATPS (RFC 6541) authorization")
 				}
+			}
 
-				if dkimAligned || spfAligned {
-					dmarcPass = true
-				}
-
-				if pf.valkey != nil {
-					disposition := string(dmarcRecord.Policy)
-					if dmarcPass {
-						disposition = "none"
-					}
-
-					dkimDom := ""
-					dkimRes := "none"
-					if len(dkimResults) > 0 {
-						dkimRes = "fail"
-						for _, v := range dkimResults {
-							if v.Err == nil {
-								dkimDom = v.Domain
-								dkimRes = "pass"
-								break
-							} else if dkimDom == "" {
-								dkimDom = v.Domain
-							}
-						}
-					}
-
-					spfResStr := "none"
-					switch spfResult {
-					case spf.Pass:
-						spfResStr = "pass"
-					case spf.Fail, spf.SoftFail:
-						spfResStr = "fail"
-					case spf.PermError, spf.TempError:
-						spfResStr = "error"
-					}
-
-					stat := DmarcRuaStat{
-						IP:          pf.ip.String(),
-						Disposition: disposition,
-						DKIMDomain:  dkimDom,
-						DKIMResult:  dkimRes,
-						SPFDomain:   senderDomain,
-						SPFResult:   spfResStr,
-					}
-
-					if b, err := json.Marshal(stat); err == nil {
-						key := fmt.Sprintf("dmarc_rua:%s:%s", time.Now().Format("20060102"), fromDomain)
-						luaScript := `
-							redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
-							if ARGV[2] ~= "" then
-								redis.call('HSET', KEYS[1], '_rua', ARGV[2])
-							end
-							if ARGV[3] ~= "" then
-								redis.call('HSET', KEYS[1], '_policy', ARGV[3])
-							end
-							redis.call('EXPIRE', KEYS[1], 180000)
-							return 1
-						`
-
-						ruaStr := ""
-						if len(dmarcRecord.ReportURIAggregate) > 0 {
-							ruaStr = strings.Join(dmarcRecord.ReportURIAggregate, ",")
-						}
-
-						pct := 100
-						if dmarcRecord.Percent != nil {
-							pct = *dmarcRecord.Percent
-						}
-
-						policyBlob, _ := json.Marshal(map[string]any{
-							"domain": fromDomain,
-							"adkim":  string(dmarcRecord.DKIMAlignment),
-							"aspf":   string(dmarcRecord.SPFAlignment),
-							"p":      string(dmarcRecord.Policy),
-							"sp":     string(dmarcRecord.SubdomainPolicy),
-							"pct":    pct,
-						})
-
-						go func(k, s, r, pol string) {
-							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-							defer cancel()
-							pf.valkey.Do(ctx, pf.valkey.B().Eval().Script(luaScript).Numkeys(1).Key(k).Arg(s).Arg(r).Arg(pol).Build())
-						}(key, string(b), ruaStr, string(policyBlob))
-					}
-				}
-
-				if dmarcPass {
-					pf.debugf("DMARC validation passed, SPF aligned: %t, DKIM aligned: %t", spfAligned, dkimAligned)
-				} else {
-					pf.debugf("DMARC validation failed or no passing/aligned signatures, SPF aligned: %t, DKIM aligned: %t", spfAligned, dkimAligned)
-					if pf.msg.policy.RejectOnDMARCFail && !bypassRejections && !dmarcPass && dmarcRecord.Policy == dmarc.PolicyReject {
-						pf.debugf("Rejecting message: DMARC policy failed, From: %v, Sender: %v, Rcpt: %v", fromDomain, senderDomain, pf.msg.firstRcpt)
-						return milter.NewResponseStr('5', "5.7.1 DMARC policy failed"), nil
+			senderDomain := extractDomainFromAddress(pf.msg.sender)
+			if pf.msg.policy.EnableSPF {
+				if isAligned(fromDomain, senderDomain, dmarcRecord.SPFAlignment) {
+					if spfResult == spf.Pass {
+						//pf.debugf("DMARC SPF aligned successfully")
+						spfAligned = true
 					}
 				}
 			}
-		} else {
-			pf.debugf("Skipping DMARC, NO dns records structurally bound for domain %v", fromDomain)
+
+			if dkimAligned || spfAligned {
+				dmarcPass = true
+			}
+
+			if pf.valkey != nil {
+				disposition := string(dmarcRecord.Policy)
+				if dmarcPass {
+					disposition = "none"
+				}
+
+				dkimDom := ""
+				dkimRes := "none"
+				if len(dkimResults) > 0 {
+					dkimRes = "fail"
+					for _, v := range dkimResults {
+						if v.Err == nil {
+							dkimDom = v.Domain
+							dkimRes = "pass"
+							break
+						} else if dkimDom == "" {
+							dkimDom = v.Domain
+						}
+					}
+				}
+
+				spfResStr := "none"
+				switch spfResult {
+				case spf.Pass:
+					spfResStr = "pass"
+				case spf.Fail, spf.SoftFail:
+					spfResStr = "fail"
+				case spf.PermError, spf.TempError:
+					spfResStr = "error"
+				}
+
+				stat := DmarcRuaStat{
+					IP:          pf.ip.String(),
+					Disposition: disposition,
+					DKIMDomain:  dkimDom,
+					DKIMResult:  dkimRes,
+					SPFDomain:   senderDomain,
+					SPFResult:   spfResStr,
+				}
+
+				if b, err := json.Marshal(stat); err == nil {
+					key := fmt.Sprintf("dmarc_rua:%s:%s", time.Now().Format("20060102"), fromDomain)
+					luaScript := `
+						redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
+						if ARGV[2] ~= "" then
+							redis.call('HSET', KEYS[1], '_rua', ARGV[2])
+						end
+						if ARGV[3] ~= "" then
+							redis.call('HSET', KEYS[1], '_policy', ARGV[3])
+						end
+						redis.call('EXPIRE', KEYS[1], 180000)
+						return 1
+					`
+
+					ruaStr := ""
+					if len(dmarcRecord.ReportURIAggregate) > 0 {
+						ruaStr = strings.Join(dmarcRecord.ReportURIAggregate, ",")
+					}
+
+					pct := 100
+					if dmarcRecord.Percent != nil {
+						pct = *dmarcRecord.Percent
+					}
+
+					policyBlob, _ := json.Marshal(map[string]any{
+						"domain": fromDomain,
+						"adkim":  string(dmarcRecord.DKIMAlignment),
+						"aspf":   string(dmarcRecord.SPFAlignment),
+						"p":      string(dmarcRecord.Policy),
+						"sp":     string(dmarcRecord.SubdomainPolicy),
+						"pct":    pct,
+					})
+
+					go func(k, s, r, pol string) {
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						defer cancel()
+						pf.valkey.Do(ctx, pf.valkey.B().Eval().Script(luaScript).Numkeys(1).Key(k).Arg(s).Arg(r).Arg(pol).Build())
+					}(key, string(b), ruaStr, string(policyBlob))
+				}
+			}
+
+			if dmarcPass {
+				pf.debugf("DMARC validation passed, SPF aligned: %t, DKIM aligned: %t", spfAligned, dkimAligned)
+			} else {
+				pf.debugf("DMARC validation failed or no passing/aligned signatures, SPF aligned: %t, DKIM aligned: %t", spfAligned, dkimAligned)
+				if pf.msg.policy.RejectOnDMARCFail && !bypassRejections && !dmarcPass && dmarcRecord.Policy == dmarc.PolicyReject {
+					pf.debugf("Rejecting message: DMARC policy failed, From: %v, Sender: %v, Rcpt: %v", fromDomain, senderDomain, pf.msg.firstRcpt)
+					return milter.NewResponseStr('5', "5.7.1 DMARC policy failed"), nil
+				}
+			}
 		}
+	} else if pf.msg.policy.EnableDMARC {
+		pf.debugf("Skipping DMARC, NO dns records structurally bound for domain %v", fromDomain)
 	}
 
 	// effectiveSPFPass is pre-computed once when SPF is evaluated (see setSpfResult).
@@ -953,6 +982,11 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 				}
 				fmt.Fprintf(&ar, "\r\n       dkim=%s header.i=@%s;", dkimPassStr, domain)
 			}
+		}
+
+		// dkim-atps entry (RFC 6541 Authorized Third-Party Signatures)
+		if policy.EnableDKIM && policy.EnableDKIMATPS && fromDomain != "" {
+			fmt.Fprintf(&ar, "\r\n       dkim-atps=%s header.from=%s;", atpsOverall, fromDomain)
 		}
 
 		// DMARC entry

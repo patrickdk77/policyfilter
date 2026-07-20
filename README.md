@@ -19,6 +19,7 @@ This application is configured natively through environment flags:
 **Note:** The `ENABLE_*` flags accept `true`, `false`, or `reject` (applies the check and rejects bad results).
 - `ENABLE_SPF` (default `true`)
 - `ENABLE_DKIM` (default `true`)
+- `ENABLE_DKIM_ATPS` (default `false`) - Enables RFC 6541 DKIM Authorized Third-Party Signatures. If a message's From domain has no directly-aligned DKIM signature, but carries a signature whose `atps` tag names that From domain, this confirms via a DNS TXT lookup (`<hash-or-domain>._atps.<from-domain>`) whether the From domain's ADMD authorized that third party to sign on its behalf. A confirmed signature is treated as DKIM-aligned for DMARC purposes and is reported as `dkim-atps=` in `Authentication-Results`. A failed or errored lookup never causes a rejection by itself; it only leaves DMARC alignment as it would have been without ATPS.
 - `ENABLE_DMARC` (default `reject`) - Enforces 5.7.1 rejection if DMARC fails and policy is reject or p=reject.
 
 - `REJECT_UNAUTHENTICATED` (default `true`) - Enforces 5.7.1 rejection if both SPF and DKIM fail together, without dmarc record.
@@ -101,6 +102,7 @@ profiles:
   default:
     EnableSPF: true
     EnableDKIM: true
+    EnableDKIMATPS: false
     EnableDMARC: true
     EnableGreylist: false
     DelayGreylisting: true

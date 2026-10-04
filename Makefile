@@ -4,11 +4,13 @@ SHORT_SHA1 := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 ORIGIN := $(shell git remote get-url origin 2>/dev/null || echo unknown)
 DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%Sz')
 VER := $(shell git describe --tags --abbrev=0 2>/dev/null || echo v0.0.1)
-DOCK_REPO := patrickdk/policyfilter
+DOCK_REPO := docker.patrickdk.com/dswett/policyfilter
+#DOCK_REPO := patrickdk/policyfilter
 
 export DOCKERFILE_PATH=Dockerfile
 export DOCKER_REPO=$(DOCK_REPO)
 export DOCKER_TAG=latest
+export DOCKER_HUB=patrickdk/policyfilter
 export GIT_BRANCH=$(BRANCH)
 export GIT_SHA1=$(SHA1)
 export GIT_SHORT_SHA1=$(SHORT_SHA1)
@@ -35,9 +37,14 @@ buildx:
 		--file ${DOCKERFILE_PATH} \
 		--tag ${IMAGE_NAME} \
 		.
-	skopeo copy --all docker://${IMAGE_NAME} docker://${DOCKER_REPO}:${GIT_VERSION_MAJOR}
-	skopeo copy --all docker://${IMAGE_NAME} docker://${DOCKER_REPO}:${GIT_VERSION_MAJOR}.${GIT_VERSION_MINOR}
-	skopeo copy --all docker://${IMAGE_NAME} docker://${DOCKER_REPO}:latest
+	skopeo copy --all docker://$(IMAGE_NAME) docker://$(DOCKER_REPO):$(GIT_VERSION_MAJOR).$(GIT_VERSION_MINOR)
+	skopeo copy --all docker://$(IMAGE_NAME) docker://$(DOCKER_REPO):$(GIT_VERSION_MAJOR)
+	skopeo copy --all docker://$(IMAGE_NAME) docker://$(DOCKER_REPO):latest
+
+	skopeo copy --all docker://$(IMAGE_NAME) docker://$(DOCKER_HUB):$(GIT_VERSION)
+	skopeo copy --all docker://$(IMAGE_NAME) docker://$(DOCKER_HUB):$(GIT_VERSION_MAJOR).$(GIT_VERSION_MINOR)
+	skopeo copy --all docker://$(IMAGE_NAME) docker://$(DOCKER_HUB):$(GIT_VERSION_MAJOR)
+	skopeo copy --all docker://$(IMAGE_NAME) docker://$(DOCKER_HUB):latest
 
 build:
 	CGO_ENABLED=0 GOAMD64=v2 go build -mod=vendor -ldflags "-s -w"

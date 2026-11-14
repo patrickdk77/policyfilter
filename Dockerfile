@@ -25,6 +25,7 @@ RUN if [ ! -d vendor ]; then \
 RUN CGO_ENABLED=0 GOAMD64=v2 go build -trimpath -buildmode=pie -mod=vendor -ldflags "-s -w" -o /app
 
 FROM scratch
+COPY --from=builder /lib/ld-musl-*.so.1 /lib/
 COPY --from=builder /app /policyfilter
 ENTRYPOINT ["/policyfilter"]
 EXPOSE 9998

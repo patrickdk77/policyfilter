@@ -348,6 +348,10 @@ func (pf *PolicyFilter) updateMacros(m *milter.Modifier) {
 	}
 }
 
+func smtpReply(reply string) *milter.CustomResponse {
+	return milter.NewResponseStr(byte(milter.ActReplyCode), reply)
+}
+
 func NewPolicyFilter(cfg *Config, vc valkey.Client, db *sql.DB) func() milter.Milter {
 	return func() milter.Milter {
 		sessionCfg := *cfg // clone connection context config
@@ -372,7 +376,7 @@ func (pf *PolicyFilter) Connect(host string, family string, port uint16, addr ne
 	pf.updateMacros(m)
 	if addr == nil || addr.String() == "<nil>" {
 		pf.debugf("Rejecting invalid client IP: '%v'", addr)
-		return milter.NewResponseStr('4', "4.3.0 Invalid client IP"), nil
+		return smtpReply("451 4.3.0 Invalid client IP"), nil
 	}
 	pf.ip = addr
 	pf.whitelisted = pf.isWhitelistedIP() // Compute only once dynamically per socket layer
@@ -388,7 +392,7 @@ func (pf *PolicyFilter) Helo(name string, m *milter.Modifier) (milter.Response, 
 
 	if name == "" || strings.ToLower(name) == "unknown" {
 		pf.debugf("Rejecting invalid or unknown HELO name: '%s'", name)
-		return milter.NewResponseStr('4', "4.5.0 Invalid or unknown HELO name"), nil
+		return smtpReply("451 4.5.0 Invalid or unknown HELO name"), nil
 	}
 	if asciiName, err := idna.ToASCII(name); err == nil {
 		name = asciiName
@@ -431,7 +435,7 @@ func (pf *PolicyFilter) Helo(name string, m *milter.Modifier) (milter.Response, 
 			}
 			if int(count) > pf.config.BasePolicy.HeloMaxChanges {
 				pf.debugf("Rejecting IP %s for excessive HELO changes", clientIP)
-				return milter.NewResponseStr('5', "5.7.1 Too many HELO names for this IP"), nil
+				return smtpReply("550 5.7.1 Too many HELO names for this IP"), nil
 			}
 		} else {
 			pf.debugf("Error evaluating HELO anomalies from valkey script: %v", err)
@@ -530,7 +534,7 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 	rcpt := strings.Trim(rcptTo, "<>")
 	if rcpt != "" && rcpt != "<>" && !strings.Contains(rcpt, "@") {
 		pf.debugf("Rejecting invalid recipient address: '%s'", rcpt)
-		return milter.NewResponseStr('4', "4.1.3 Invalid recipient address"), nil
+		return smtpReply("501 5.1.3 Invalid recipient address"), nil
 	}
 
 	if pf.db != nil && pf.msg.firstRcpt == "" {
@@ -624,7 +628,7 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 				pf.msg.greylistDelayed = true
 				return milter.RespContinue, nil
 			}
-			return milter.NewResponseStr('4', "4.7.1 Greylisted, please try again later"), nil
+			return smtpReply("450 4.7.1 Greylisted, please try again later"), nil
 		} else if err != nil {
 			pf.debugf("Greylist Valkey error: %v", err)
 			return milter.RespContinue, nil
@@ -636,7 +640,7 @@ func (pf *PolicyFilter) RcptTo(rcptTo string, m *milter.Modifier) (milter.Respon
 				pf.msg.greylistDelayed = true
 				return milter.RespContinue, nil
 			}
-			return milter.NewResponseStr('4', "4.7.1 Greylisted, please try again later"), nil
+			return smtpReply("450 4.7.1 Greylisted, please try again later"), nil
 		} else {
 			pf.valkey.Do(ctx, pf.valkey.B().Expire().Key(key).Seconds(pf.config.GreylistMatchedTTL).Build())
 			pf.debugf("Greylisting PASSED triplet (IP %s, Sender %s, Rcpt %s)", maskedIP, pf.msg.sender, rcpt)
@@ -684,7 +688,7 @@ func (pf *PolicyFilter) Headers(h textproto.MIMEHeader, m *milter.Modifier) (mil
 func (pf *PolicyFilter) BodyChunk(chunk []byte, m *milter.Modifier) (milter.Response, error) {
 	if pf.msg.msgBuf.Len()+len(chunk) > pf.config.MaxMessageSize {
 		pf.debugf("Rejecting message: exceeded MaxMessageSize of %d bytes", pf.config.MaxMessageSize)
-		return milter.NewResponseStr('5', "5.3.4 Message size exceeds maximum allowed size"), nil
+		return smtpReply("552 5.3.4 Message size exceeds maximum allowed size"), nil
 	}
 	pf.msg.msgBuf.Write(chunk)
 	return milter.RespContinue, nil
@@ -897,7 +901,7 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 				pf.debugf("DMARC validation failed or no passing/aligned signatures, SPF aligned: %t, DKIM aligned: %t", spfAligned, dkimAligned)
 				if pf.msg.policy.RejectOnDMARCFail && !bypassRejections && !dmarcPass && dmarcRecord.Policy == dmarc.PolicyReject {
 					pf.debugf("Rejecting message: DMARC policy failed, From: %v, Sender: %v, Rcpt: %v", fromDomain, senderDomain, pf.msg.firstRcpt)
-					return milter.NewResponseStr('5', "5.7.1 DMARC policy failed"), nil
+					return smtpReply("550 5.7.1 DMARC policy failed"), nil
 				}
 			}
 		}
@@ -913,25 +917,25 @@ func (pf *PolicyFilter) Body(m *milter.Modifier) (milter.Response, error) {
 		if !effectiveSPFPass && !dkimPass {
 			pf.debugf("Rejecting because neither SPF nor DKIM passed")
 			if spfResult == spf.TempError {
-				return milter.NewResponseStr('4', "4.7.1 Message is not authenticated (SPF/DKIM failed)"), nil
+				return smtpReply("451 4.7.24 Message is not authenticated (SPF/DKIM failed)"), nil
 			}
-			return milter.NewResponseStr('5', "5.7.1 Message is not authenticated (SPF/DKIM failed)"), nil
+			return smtpReply("550 5.7.26 Message is not authenticated (SPF/DKIM failed)"), nil
 		}
 	}
 
 	if policy.EnableSPF && policy.RejectOnSPFFail && !bypassRejections && !dmarcPass && spfResult == spf.Fail {
 		pf.debugf("Rejecting message: SPF validation failed")
-		return milter.NewResponseStr('5', "5.7.1 SPF validation failed"), nil
+		return smtpReply("550 5.7.23 SPF validation failed"), nil
 	}
 
 	if pf.msg.policy.EnableDKIM && pf.msg.policy.RejectOnDKIMFail && !bypassRejections && !dmarcPass && !dkimPass && len(dkimResults) > 0 {
 		pf.debugf("Rejecting message: DKIM signature missing or invalid")
-		return milter.NewResponseStr('5', "5.7.1 DKIM signature missing or invalid"), nil
+		return smtpReply("550 5.7.20 DKIM signature missing or invalid"), nil
 	}
 
 	if !effectiveSPFPass && !dmarcPass && !dkimPass && pf.msg.greylistDelayed {
 		pf.debugf("Applying delayed Greylisting rejection after payload analysis")
-		return milter.NewResponseStr('4', "4.7.1 Greylisted, please try again later"), nil
+		return smtpReply("450 4.7.1 Greylisted, please try again later"), nil
 	} else if pf.msg.greylistDelayed {
 		pf.debugf("Not applying delayed Greylisting rejection after payload analysis due to authentication")
 	}
